@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+import asyncio
+import mimetypes
+import secrets
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response, StreamingResponse
+import httpx
+
+from .conversation import ConversationProvider, OllamaConversation, SafeDemoConversation
+from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut
+from .quality import ImageValidationError, inspect_image
+from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
+from .settings import Settings
+from .store import Store
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    config = settings or Settings.from_env()
+    store = Store(config.database_path)
+    renderer: AvatarRenderer = RemoteRenderer(config.avatar_renderer_url, config.worker_shared_token) if config.avatar_engine == "remote" and config.avatar_renderer_url else PreviewRenderer()
+    conversation: ConversationProvider = OllamaConversation(config.ollama_url, config.ollama_model) if config.ollama_url else SafeDemoConversation()
+    upload_dir = config.data_dir / "uploads"
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        store.initialize()
+        yield
+
+    app = FastAPI(title="Empathic Avatar Control API", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.allowed_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def prototype_access_gate(request: Request, call_next):
+        """Optional single-tenant gate for private deployments.
+
+        This is intentionally not a replacement for OIDC/session-based tenant
+        authorization; it prevents accidental exposure while an auth gateway is
+        being integrated.
+        """
+        if config.api_access_token and request.url.path != "/api/health":
+            supplied = request.headers.get("X-Avatar-Token", "")
+            if not secrets.compare_digest(supplied, config.api_access_token):
+                return Response(status_code=401, content='{"detail":"Unauthorized"}', media_type="application/json")
+        return await call_next(request)
+
+    @app.get("/api/health", response_model=HealthOut)
+    async def health() -> HealthOut:
+        return HealthOut(status="ok", engine=renderer.mode, llm=conversation.name)
+
+    @app.get("/api/avatars", response_model=list[AvatarOut])
+    async def list_avatars() -> list[AvatarOut]:
+        return store.list_avatars()
+
+    @app.get("/api/avatars/{avatar_id}", response_model=AvatarOut)
+    async def get_avatar(avatar_id: str) -> AvatarOut:
+        return _avatar_or_404(store, avatar_id)
+
+    @app.post("/api/avatars", response_model=AvatarOut, status_code=201)
+    async def create_avatar(
+        background_tasks: BackgroundTasks,
+        image: Annotated[UploadFile, File(...)],
+        name: Annotated[str, Form(min_length=1, max_length=60)],
+        persona: Annotated[str, Form(min_length=1, max_length=240)],
+        voice: Annotated[str, Form(min_length=1, max_length=80)],
+        consent_likeness: Annotated[bool, Form(...)],
+        consent_adult: Annotated[bool, Form(...)],
+        consent_ai_label: Annotated[bool, Form(...)],
+    ) -> AvatarOut:
+        if not (consent_likeness and consent_adult and consent_ai_label):
+            raise HTTPException(status_code=422, detail="권리·성인·AI 표시 동의를 모두 확인해야 합니다.")
+        raw = await _read_limited_upload(image)
+        try:
+            quality = inspect_image(raw, image.content_type)
+        except ImageValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[image.content_type or ""]
+        avatar_id = str(uuid.uuid4())
+        source_path = upload_dir / f"{avatar_id}{suffix}"
+        source_path.write_bytes(raw)
+        status = "preparing" if renderer.mode == "remote" else "ready"
+        avatar = store.create_avatar(
+            avatar_id=avatar_id,
+            name=name.strip(),
+            persona=persona.strip(),
+            voice=voice.strip(),
+            source_path=str(source_path),
+            status=status,
+            engine=renderer.mode,
+            quality=quality,
+            likeness=consent_likeness,
+            adult=consent_adult,
+            ai_label=consent_ai_label,
+        )
+        if renderer.mode == "remote":
+            background_tasks.add_task(_prepare_remote_avatar, store, renderer, avatar.id, source_path)
+        else:
+            prepared = await renderer.prepare(avatar, source_path)
+            store.set_avatar_status(avatar.id, "ready", engine=renderer.mode, cache_ref=prepared.cache_ref)
+            avatar = store.get_avatar(avatar.id)
+        return avatar
+
+    @app.get("/api/assets/{avatar_id}")
+    async def source_asset(avatar_id: str) -> FileResponse:
+        try:
+            path = store.get_source_path(avatar_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="아바타를 찾을 수 없습니다.") from error
+        if not path or not path.is_file():
+            raise HTTPException(status_code=404, detail="원본 이미지가 없습니다.")
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=300"})
+
+    @app.get("/api/rendered/{filename}")
+    async def rendered_asset(filename: str) -> Response:
+        if not isinstance(renderer, RemoteRenderer):
+            raise HTTPException(status_code=404, detail="렌더 결과를 찾을 수 없습니다.")
+        try:
+            body, media_type = await renderer.read_render(filename)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="렌더 결과를 찾을 수 없습니다.") from error
+        return Response(content=body, media_type=media_type, headers={"Cache-Control": "private, max-age=60"})
+
+    @app.get("/api/live-media/{turn_id}")
+    async def live_media_asset(turn_id: str) -> StreamingResponse:
+        if not isinstance(renderer, RemoteRenderer):
+            raise HTTPException(status_code=404, detail="라이브 스트림을 찾을 수 없습니다.")
+
+        async def proxy_stream():
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, read=180)) as client:
+                async with client.stream("GET", f"{renderer.base_url}/v1/assets/live/{turn_id}", headers=renderer.headers) as upstream:
+                    if upstream.status_code == 404:
+                        return
+                    upstream.raise_for_status()
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(proxy_stream(), media_type="multipart/x-mixed-replace; boundary=frame", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/live-audio/{filename}")
+    async def live_audio_asset(filename: str) -> Response:
+        if not isinstance(renderer, RemoteRenderer):
+            raise HTTPException(status_code=404, detail="라이브 오디오를 찾을 수 없습니다.")
+        try:
+            body, media_type = await renderer.read_live_asset(filename, "audio")
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="라이브 오디오를 찾을 수 없습니다.") from error
+        return Response(content=body, media_type=media_type, headers={"Cache-Control": "private, max-age=60"})
+
+    @app.delete("/api/avatars/{avatar_id}", status_code=204)
+    async def delete_avatar(avatar_id: str) -> Response:
+        _avatar_or_404(store, avatar_id)
+        try:
+            await renderer.delete(avatar_id)
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="GPU 캐시를 지우지 못했습니다. 잠시 후 다시 시도해 주세요.") from error
+        try:
+            source_path = store.delete_avatar(avatar_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="아바타를 찾을 수 없습니다.") from error
+        if source_path and source_path.is_file():
+            source_path.unlink()
+        return Response(status_code=204)
+
+    @app.post("/api/live/sessions", response_model=SessionOut, status_code=201)
+    async def create_session(body: CreateSessionIn) -> SessionOut:
+        avatar = _avatar_or_404(store, body.avatar_id)
+        if avatar.status != "ready":
+            raise HTTPException(status_code=409, detail="아바타 준비가 끝난 뒤 대화를 시작할 수 있습니다.")
+        # A restarted GPU worker has no in-memory source registration. Warm it
+        # while the room says "connecting", so the first utterance does not
+        # pay the photo-registration cost.
+        if isinstance(renderer, RemoteRenderer):
+            source_path = store.get_source_path(avatar.id)
+            if source_path and source_path.is_file():
+                try:
+                    await renderer.prepare(avatar, source_path)
+                except Exception as error:
+                    raise HTTPException(status_code=502, detail="GPU 아바타 준비에 실패했습니다.") from error
+        return store.create_session(str(uuid.uuid4()), avatar.id)
+
+    @app.post("/api/live/sessions/{session_id}/turns", response_model=TurnOut)
+    async def create_turn(session_id: str, body: TurnIn) -> TurnOut:
+        session = _session_or_404(store, session_id)
+        if session.state != "active":
+            raise HTTPException(status_code=409, detail="종료된 세션입니다.")
+        avatar = _avatar_or_404(store, session.avatar_id)
+        turn_id = str(uuid.uuid4())
+        store.set_active_turn(session_id, turn_id)
+        assistant_text = await conversation.respond(persona=avatar.persona, user_text=body.text.strip())
+        if not store.is_active_turn(session_id, turn_id):
+            raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
+        visemes, renderer_out = await renderer.render(
+            avatar, session_id=session_id, turn_id=turn_id, text=assistant_text, motion_plan=body.motion_plan
+        )
+        if not store.is_active_turn(session_id, turn_id):
+            raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
+        store.set_active_turn(session_id, None)
+        return TurnOut(turn_id=turn_id, assistant_text=assistant_text, visemes=visemes, renderer=renderer_out)
+
+    @app.post("/api/live/sessions/{session_id}/interrupt")
+    async def interrupt_session(session_id: str) -> dict[str, str]:
+        _session_or_404(store, session_id)
+        store.set_active_turn(session_id, None)
+        try:
+            await renderer.cancel(session_id)
+        except Exception:
+            # The control plane must still release the UI immediately; GPU retry is observable elsewhere.
+            pass
+        return {"state": "ready"}
+
+    @app.delete("/api/live/sessions/{session_id}", status_code=204)
+    async def end_session(session_id: str) -> Response:
+        try:
+            store.end_session(session_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.") from error
+        return Response(status_code=204)
+
+    @app.websocket("/ws/live/{session_id}")
+    async def live_websocket(websocket: WebSocket, session_id: str) -> None:
+        """Lightweight live-control channel; media tracks move to LiveKit in GPU mode."""
+        supplied_token = websocket.headers.get("X-Avatar-Token") or websocket.query_params.get("access_token") or ""
+        if config.api_access_token and not secrets.compare_digest(supplied_token, config.api_access_token):
+            await websocket.close(code=4401)
+            return
+        try:
+            session = _session_or_404(store, session_id)
+        except HTTPException:
+            await websocket.close(code=4404)
+            return
+        await websocket.accept()
+        await websocket.send_json({"type": "room.state", "state": "ready", "session_id": session.id})
+        try:
+            while True:
+                payload = await websocket.receive_json()
+                if payload.get("type") == "interrupt":
+                    store.set_active_turn(session_id, None)
+                    await renderer.cancel(session_id)
+                    await websocket.send_json({"type": "turn.cancelled"})
+                    continue
+                if payload.get("type") != "turn" or not isinstance(payload.get("text"), str):
+                    await websocket.send_json({"type": "error", "detail": "Expected {type: 'turn', text: string}"})
+                    continue
+                text = payload["text"].strip()
+                if not text:
+                    continue
+                try:
+                    turn_body = TurnIn.model_validate({"text": text, "motion_plan": payload.get("motion_plan")})
+                except Exception as error:
+                    await websocket.send_json({"type": "error", "detail": f"Invalid motion_plan: {error}"})
+                    continue
+                avatar = _avatar_or_404(store, session.avatar_id)
+                turn_id = str(uuid.uuid4())
+                store.set_active_turn(session_id, turn_id)
+                await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
+                answer = await conversation.respond(persona=avatar.persona, user_text=text)
+                if not store.is_active_turn(session_id, turn_id):
+                    await websocket.send_json({"type": "turn.cancelled", "turn_id": turn_id})
+                    continue
+                visemes, render_out = await renderer.render(
+                    avatar, session_id=session_id, turn_id=turn_id, text=answer, motion_plan=turn_body.motion_plan
+                )
+                store.set_active_turn(session_id, None)
+                await websocket.send_json({"type": "caption.final", "turn_id": turn_id, "text": answer})
+                await websocket.send_json({"type": "renderer", "turn_id": turn_id, "visemes": [item.model_dump() for item in visemes], "renderer": render_out.model_dump()})
+        except WebSocketDisconnect:
+            return
+
+    app.state.store = store
+    app.state.settings = config
+    return app
+
+
+async def _prepare_remote_avatar(store: Store, renderer: AvatarRenderer, avatar_id: str, source_path: Path) -> None:
+    try:
+        avatar = store.get_avatar(avatar_id)
+        preparation = await renderer.prepare(avatar, source_path)
+        store.set_avatar_status(avatar_id, "ready", engine=renderer.mode, cache_ref=preparation.cache_ref)
+    except Exception:
+        store.set_avatar_status(avatar_id, "failed", engine=renderer.mode)
+
+
+def _avatar_or_404(store: Store, avatar_id: str) -> AvatarOut:
+    try:
+        return store.get_avatar(avatar_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="아바타를 찾을 수 없습니다.") from error
+
+
+def _session_or_404(store: Store, session_id: str) -> SessionOut:
+    try:
+        return store.get_session(session_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.") from error
+
+
+async def _read_limited_upload(upload: UploadFile, limit: int = 12 * 1024 * 1024) -> bytes:
+    """Bound memory use before image decoding; UploadFile may not expose size."""
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="이미지는 12MB 이하로 업로드해 주세요.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+app = create_app()

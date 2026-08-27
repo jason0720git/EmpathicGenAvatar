@@ -1,0 +1,57 @@
+# GPU extension. Start with:
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# Before starting, mount an audited Ditto source checkout at ./vendor/ditto-talkinghead
+# and audited checkpoints at ./models/ditto. The files are intentionally excluded
+# from git and are never downloaded silently by this project.
+services:
+  api:
+    environment:
+      AVATAR_ENGINE: remote
+      AVATAR_RENDERER_URL: http://avatar-worker:8010
+      WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
+    depends_on:
+      avatar-worker:
+        condition: service_healthy
+
+  avatar-worker:
+    build:
+      context: ./workers/avatar
+      args:
+        # Match this base to the TensorRT/CUDA version used for your audited Ditto build.
+        BASE_IMAGE: ${DITTO_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:25.02-py3}
+    environment:
+      AVATAR_DATA_ROOT: /data
+      # WebSocket PCM/JPEG streaming: the worker emits audio and video with a
+      # shared 25-fps PTS clock. `ditto_batch` remains the offline reference.
+      AVATAR_RENDER_MODE: ${AVATAR_RENDER_MODE:-ditto_live}
+      DITTO_ROOT: /opt/ditto
+      # RTX 5090 cannot load Ditto's supplied TensorRT 8 plugin. Use the
+      # official PyTorch checkpoint path; TensorRT engines are still retained
+      # in /data for a future TRT-10-compatible plugin build.
+      DITTO_MODEL_ROOT: /models/ditto/ditto_pytorch
+      DITTO_CONFIG: /models/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl
+      # Conversational preset.  The quality/offline tier can raise this to
+      # 10–50, but every extra diffusion step delays the first live frame.
+      DITTO_SAMPLING_TIMESTEPS: ${DITTO_SAMPLING_TIMESTEPS:-4}
+      MUSETALK_ROOT: /opt/musetalk
+      MUSETALK_MODEL_ROOT: /models/musetalk
+      MUSETALK_BATCH_SIZE: ${MUSETALK_BATCH_SIZE:-8}
+      # LivePortrait prepares a short learned head/eye/expression loop once.
+      # MuseTalk then adds the audio-driven mouth as the final stage.
+      LIVEPORTRAIT_ROOT: /opt/liveportrait
+      LIVEPORTRAIT_MODEL_ROOT: /models/liveportrait
+      LIVEPORTRAIT_MOTION_FRAMES: ${LIVEPORTRAIT_MOTION_FRAMES:-50}
+      WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
+    volumes:
+      - avatar-data:/data
+      - ./vendor/ditto-talkinghead:/opt/ditto:ro
+      - ./models:/models:ro
+      - ./vendor/MuseTalk:/opt/musetalk:ro
+      - ./vendor/LivePortrait:/opt/liveportrait:ro
+    gpus: all
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12

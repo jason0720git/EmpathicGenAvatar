@@ -1,0 +1,13 @@
+.git
+.env
+.venv
+node_modules
+**/node_modules
+**/dist
+**/.vite
+**/__pycache__
+**/*.pyc
+data
+models
+vendor
+.pytest_cache

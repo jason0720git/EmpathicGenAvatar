@@ -1,0 +1,9 @@
+ Image empathic-avatar-web Building 
+ Image empathic-avatar-api Building 
+ Image empathic-avatar-avatar-worker Building 
+ Image empathic-avatar-avatar-worker Built 
+ Image empathic-avatar-api Built 
+ Image empathic-avatar-web Built 
+ Container empathic-avatar-avatar-worker-1 Recreate 
+ Container empathic-avatar-avatar-worker-1 Error response from daemon: Conflict. The container name "/50e377c121f9_empathic-avatar-avatar-worker-1" is already in use by container "66349cda7e9d891bcbdbf097230d10e2e3f6acb7dc968aa599fb76fad5123ccd". You have to remove (or rename) that container to be able to reuse that name. 
+Error response from daemon: Conflict. The container name "/50e377c121f9_empathic-avatar-avatar-worker-1" is already in use by container "66349cda7e9d891bcbdbf097230d10e2e3f6acb7dc968aa599fb76fad5123ccd". You have to remove (or rename) that container to be able to reuse that name.
