@@ -50,9 +50,10 @@ class RemoteRenderer(AvatarRenderer):
 
     mode = "remote"
 
-    def __init__(self, base_url: str, shared_token: str | None = None):
+    def __init__(self, base_url: str, shared_token: str | None = None, stream_prefix: str = "/avatar-stream/"):
         self.base_url = base_url.rstrip("/")
         self.headers = {"X-Worker-Token": shared_token} if shared_token else {}
+        self.stream_prefix = stream_prefix.rstrip("/") + "/"
 
     async def prepare(self, avatar: AvatarOut, source_path: Path) -> Preparation:
         payload: dict[str, Any] = {
@@ -80,6 +81,8 @@ class RemoteRenderer(AvatarRenderer):
         body = response.json()
         visemes = [Viseme.model_validate(item) for item in body.get("visemes", [])]
         stream_url = body.get("stream_url")
+        if isinstance(stream_url, str) and stream_url.startswith("/avatar-stream/"):
+            stream_url = self.stream_prefix + stream_url.removeprefix("/avatar-stream/")
         # The GPU worker is private to Docker. Serve completed video through
         # the control API instead of exposing its network address to browsers.
         if isinstance(stream_url, str) and stream_url.startswith("/v1/assets/renders/"):

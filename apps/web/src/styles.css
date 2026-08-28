@@ -95,6 +95,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .motion-status i { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #6de1c8; box-shadow: 0 0 9px #6de1c8; }
 .motion-status b { color: #737fc2; font-weight: 400; }
 
+.method-picker { max-width: 620px; margin: clamp(30px, 9vh, 100px) auto; padding: clamp(24px, 4vw, 40px); border: 1px solid rgba(177, 189, 231, .16); border-radius: 16px; background: linear-gradient(145deg, rgba(28, 35, 77, .9), rgba(14, 20, 48, .95)); box-shadow: 0 22px 70px rgba(0, 0, 0, .2); }
+.method-picker h1 { margin: 10px 0 7px; color: #f1f3ff; font-size: clamp(25px, 4vw, 34px); letter-spacing: -1px; }
+.method-picker > p { margin: 0 0 24px; color: #95a2c3; font-size: 14px; }
+.method-options { display: grid; gap: 10px; }
+.method-option { display: flex; align-items: center; gap: 13px; width: 100%; padding: 18px; color: #dce4fa; border: 1px solid rgba(174, 187, 230, .17); border-radius: 11px; background: rgba(8, 13, 31, .36); text-align: left; }
+.method-option.selected { border-color: rgba(163, 218, 246, .72); background: linear-gradient(100deg, rgba(110, 91, 183, .28), rgba(52, 123, 160, .2)); box-shadow: inset 0 0 0 1px rgba(200, 176, 255, .1); }
+.method-radio { display: grid; flex: none; place-items: center; width: 19px; height: 19px; border: 2px solid #a8b6d8; border-radius: 50%; }.method-option.selected .method-radio { border-color: #bfeafd; box-shadow: inset 0 0 0 4px #6fb8d9; }
+.method-option span:nth-child(2) { display: grid; gap: 4px; flex: 1; }.method-option strong { font-size: 15px; }.method-option small, .method-note { color: #8997b8; font-size: 11px; line-height: 1.45; }.method-option em { padding: 4px 7px; color: #9bead8; border-radius: 999px; background: rgba(88, 205, 171, .13); font-family: 'DM Mono', monospace; font-size: 9px; font-style: normal; }.method-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }.method-note { display: block; margin-top: 14px; }
+
 /* The idle source and live Ditto canvas share one rectangular media plane. */
 .video-canvas .portrait.large { position: absolute; inset: 0; width: 100%; height: 100%; }
 .video-canvas .portrait.large .portrait-illustration,

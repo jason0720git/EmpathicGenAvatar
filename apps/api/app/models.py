@@ -25,8 +25,12 @@ class AvatarOut(BaseModel):
     quality: ImageQuality | None = None
 
 
+RendererMethod = Literal["ditto", "ditto_realtime", "fast"]
+
+
 class CreateSessionIn(BaseModel):
     avatar_id: str
+    renderer_method: RendererMethod = "ditto"
 
 
 class SessionOut(BaseModel):
@@ -34,6 +38,7 @@ class SessionOut(BaseModel):
     avatar_id: str
     state: Literal["active", "ended"]
     created_at: datetime
+    renderer_method: RendererMethod = "ditto"
 
 
 class TurnIn(BaseModel):

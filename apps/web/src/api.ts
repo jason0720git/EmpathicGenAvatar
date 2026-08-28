@@ -1,4 +1,4 @@
-import type { Avatar, LiveSession, MotionPlan, TurnResponse } from './types'
+import type { Avatar, LiveSession, MotionPlan, RendererMethod, TurnResponse } from './types'
 
 const base = import.meta.env.VITE_API_BASE_URL ?? ''
 const accessToken = import.meta.env.VITE_API_ACCESS_TOKEN
@@ -50,10 +50,10 @@ export const api = {
     return request<Avatar>('/api/avatars', { method: 'POST', body: form })
   },
   deleteAvatar: (id: string) => request<void>(`/api/avatars/${id}`, { method: 'DELETE' }),
-  createSession: (avatarId: string) =>
+  createSession: (avatarId: string, rendererMethod: RendererMethod) =>
     request<LiveSession>('/api/live/sessions', {
       method: 'POST',
-      body: JSON.stringify({ avatar_id: avatarId }),
+      body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod }),
     }),
   sendTurn: (sessionId: string, text: string, motionPlan?: MotionPlan) =>
     request<TurnResponse>(`/api/live/sessions/${sessionId}/turns`, {

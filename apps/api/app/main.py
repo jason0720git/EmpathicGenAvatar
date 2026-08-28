@@ -25,6 +25,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or Settings.from_env()
     store = Store(config.database_path)
     renderer: AvatarRenderer = RemoteRenderer(config.avatar_renderer_url, config.worker_shared_token) if config.avatar_engine == "remote" and config.avatar_renderer_url else PreviewRenderer()
+    fast_renderer: AvatarRenderer | None = RemoteRenderer(
+        config.fast_avatar_renderer_url, config.worker_shared_token, stream_prefix="/avatar-stream-fast/"
+    ) if config.fast_avatar_renderer_url else None
+    realtime_renderer: AvatarRenderer | None = RemoteRenderer(
+        config.realtime_avatar_renderer_url, config.worker_shared_token, stream_prefix="/avatar-stream-realtime/"
+    ) if config.realtime_avatar_renderer_url else None
     conversation: ConversationProvider = OllamaConversation(config.ollama_url, config.ollama_model) if config.ollama_url else SafeDemoConversation()
     upload_dir = config.data_dir / "uploads"
 
@@ -164,7 +170,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def delete_avatar(avatar_id: str) -> Response:
         _avatar_or_404(store, avatar_id)
         try:
-            await renderer.delete(avatar_id)
+            renderers = [renderer, *([realtime_renderer] if realtime_renderer else []), *([fast_renderer] if fast_renderer else [])]
+            await asyncio.gather(*(item.delete(avatar_id) for item in renderers))
         except Exception as error:
             raise HTTPException(status_code=502, detail="GPU 캐시를 지우지 못했습니다. 잠시 후 다시 시도해 주세요.") from error
         try:
@@ -183,14 +190,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # A restarted GPU worker has no in-memory source registration. Warm it
         # while the room says "connecting", so the first utterance does not
         # pay the photo-registration cost.
-        if isinstance(renderer, RemoteRenderer):
+        selected_renderer = _renderer_for_method(body.renderer_method, renderer, realtime_renderer, fast_renderer)
+        if isinstance(selected_renderer, RemoteRenderer):
             source_path = store.get_source_path(avatar.id)
             if source_path and source_path.is_file():
                 try:
-                    await renderer.prepare(avatar, source_path)
+                    await selected_renderer.prepare(avatar, source_path)
                 except Exception as error:
-                    raise HTTPException(status_code=502, detail="GPU 아바타 준비에 실패했습니다.") from error
-        return store.create_session(str(uuid.uuid4()), avatar.id)
+                    label = "Ditto Realtime" if body.renderer_method == "ditto_realtime" else "Fast Live" if body.renderer_method == "fast" else "Ditto Default"
+                    raise HTTPException(status_code=502, detail=f"{label} GPU 아바타 준비에 실패했습니다.") from error
+        return store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method)
 
     @app.post("/api/live/sessions/{session_id}/turns", response_model=TurnOut)
     async def create_turn(session_id: str, body: TurnIn) -> TurnOut:
@@ -198,12 +207,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if session.state != "active":
             raise HTTPException(status_code=409, detail="종료된 세션입니다.")
         avatar = _avatar_or_404(store, session.avatar_id)
+        selected_renderer = _renderer_for_method(session.renderer_method, renderer, realtime_renderer, fast_renderer)
         turn_id = str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
         assistant_text = await conversation.respond(persona=avatar.persona, user_text=body.text.strip())
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
-        visemes, renderer_out = await renderer.render(
+        visemes, renderer_out = await selected_renderer.render(
             avatar, session_id=session_id, turn_id=turn_id, text=assistant_text, motion_plan=body.motion_plan
         )
         if not store.is_active_turn(session_id, turn_id):
@@ -216,7 +226,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _session_or_404(store, session_id)
         store.set_active_turn(session_id, None)
         try:
-            await renderer.cancel(session_id)
+            await _renderer_for_method(_session_or_404(store, session_id).renderer_method, renderer, realtime_renderer, fast_renderer).cancel(session_id)
         except Exception:
             # The control plane must still release the UI immediately; GPU retry is observable elsewhere.
             pass
@@ -249,7 +259,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 payload = await websocket.receive_json()
                 if payload.get("type") == "interrupt":
                     store.set_active_turn(session_id, None)
-                    await renderer.cancel(session_id)
+                    await _renderer_for_method(session.renderer_method, renderer, realtime_renderer, fast_renderer).cancel(session_id)
                     await websocket.send_json({"type": "turn.cancelled"})
                     continue
                 if payload.get("type") != "turn" or not isinstance(payload.get("text"), str):
@@ -264,6 +274,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await websocket.send_json({"type": "error", "detail": f"Invalid motion_plan: {error}"})
                     continue
                 avatar = _avatar_or_404(store, session.avatar_id)
+                selected_renderer = _renderer_for_method(session.renderer_method, renderer, realtime_renderer, fast_renderer)
                 turn_id = str(uuid.uuid4())
                 store.set_active_turn(session_id, turn_id)
                 await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
@@ -271,7 +282,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not store.is_active_turn(session_id, turn_id):
                     await websocket.send_json({"type": "turn.cancelled", "turn_id": turn_id})
                     continue
-                visemes, render_out = await renderer.render(
+                visemes, render_out = await selected_renderer.render(
                     avatar, session_id=session_id, turn_id=turn_id, text=answer, motion_plan=turn_body.motion_plan
                 )
                 store.set_active_turn(session_id, None)
@@ -299,6 +310,18 @@ def _avatar_or_404(store: Store, avatar_id: str) -> AvatarOut:
         return store.get_avatar(avatar_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="아바타를 찾을 수 없습니다.") from error
+
+
+def _renderer_for_method(method: str, ditto_renderer: AvatarRenderer, realtime_renderer: AvatarRenderer | None, fast_renderer: AvatarRenderer | None) -> AvatarRenderer:
+    if method == "ditto_realtime":
+        if realtime_renderer is None:
+            raise HTTPException(status_code=409, detail="Ditto Realtime renderer가 아직 배포되지 않았습니다.")
+        return realtime_renderer
+    if method == "fast":
+        if fast_renderer is None:
+            raise HTTPException(status_code=409, detail="Fast Live renderer가 아직 배포되지 않았습니다.")
+        return fast_renderer
+    return ditto_renderer
 
 
 def _session_or_404(store: Store, session_id: str) -> SessionOut:

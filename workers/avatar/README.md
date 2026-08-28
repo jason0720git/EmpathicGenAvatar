@@ -5,11 +5,12 @@ The worker is intentionally a narrow GPU adapter, not a second application serve
 ## Modes
 
 - `AVATAR_RENDER_MODE=stub`: validates avatar preparation and persists cache metadata only.
-- `AVATAR_RENDER_MODE=ditto_live` (GPU compose default): keeps `StreamSDK` loaded and emits 40 ms 16 kHz PCM plus JPEG frames carrying the same 25-fps PTS over one WebSocket. The browser uses its AudioContext clock to schedule both, so video cannot race ahead of independently loaded audio.
+- `AVATAR_RENDER_MODE=ditto_live` (`Ditto Default`): stable baseline. It keeps `StreamSDK` loaded, renders the completed local TTS WAV, and emits 40 ms 16 kHz PCM plus JPEG frames carrying the same 25-fps PTS over one WebSocket.
+- `AVATAR_RENDER_MODE=ditto_realtime` (`Ditto Realtime`): separate experimental worker. It uses Ditto's online `run_chunk` interface and a PCM-owned 25-fps clock: the local TTS segments are prepared concurrently, concatenated in text order, and their exact duration limits the generated motion and PCM packets together. This is the low-latency implementation track; it does not modify the Default worker.
 - `AVATAR_RENDER_MODE=ditto_batch`: uses Ditto's official offline pipeline and muxes its generated video with the exact WAV into one MP4. This is the offline sync-reference path.
 - `AVATAR_RENDER_MODE=musetalk_live`: retained as a mouth-rendering fallback. It prepares LivePortrait base frames and then performs MuseTalk lower-face inpainting.
 
-In `ditto_live`, avatar preparation runs two silent Ditto windows and discards their frames. This deliberately moves the one-time CUDA/ONNX/PyTorch kernel warm-up from the first spoken turn to the avatar-ready phase. The MJPEG sink then paces emitted frames at 25 fps rather than flushing a queued burst to the browser.
+In both Ditto modes, avatar preparation runs two silent Ditto windows and discards their frames. This deliberately moves the one-time CUDA/ONNX/PyTorch kernel warm-up from the first spoken turn to the avatar-ready phase. Realtime uses a 220 ms browser playout buffer; Default retains its conservative 600 ms stability buffer.
 
 ## MuseTalk product-prototype prerequisites
 

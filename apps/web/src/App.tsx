@@ -34,9 +34,10 @@ import {
 } from 'lucide-react'
 import { ApiError, api } from './api'
 import { localTurn } from './localTurn'
-import type { Avatar, ExpressionIntent, LiveState, MotionPlan, TranscriptItem, TurnResponse } from './types'
+import type { Avatar, LiveState, MotionPlan, TranscriptItem, TurnResponse } from './types'
 
-type Page = 'dashboard' | 'avatars' | 'create' | 'live'
+type Page = 'dashboard' | 'avatars' | 'create' | 'method' | 'live'
+type ConversationMethod = 'ditto' | 'ditto_realtime'
 
 interface SpeechRecognitionResultEventLike extends Event {
   results: {
@@ -95,6 +96,11 @@ const pageMeta: Record<Page, { eyebrow: string; title: string; description: stri
     title: '라이브 룸',
     description: 'AI 생성 아바타와 실시간으로 대화 중입니다.',
   },
+  method: {
+    eyebrow: 'CONVERSATION METHOD',
+    title: '방식 선택',
+    description: '이번 대화에 사용할 아바타 렌더링 방식을 선택하세요.',
+  },
 }
 
 function sourceUrl(avatar: Avatar) {
@@ -126,6 +132,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [avatars, setAvatars] = useState<Avatar[]>([])
   const [selectedAvatarId, setSelectedAvatarId] = useState(defaultAvatar.id)
+  const [selectedMethod, setSelectedMethod] = useState<ConversationMethod>('ditto')
   const [apiOnline, setApiOnline] = useState(true)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -155,7 +162,8 @@ export default function App() {
 
   const openLive = (avatar: Avatar) => {
     setSelectedAvatarId(avatar.id)
-    setPage('live')
+    setSelectedMethod('ditto')
+    setPage('method')
   }
 
   const addAvatar = (avatar: Avatar) => {
@@ -188,7 +196,7 @@ export default function App() {
         <nav className="primary-nav" aria-label="Main navigation">
           <NavItem active={page === 'dashboard'} icon={<LayoutDashboard size={18} />} label="개요" onClick={() => setPage('dashboard')} />
           <NavItem active={page === 'avatars'} icon={<Bot size={18} />} label="내 아바타" onClick={() => setPage('avatars')} />
-          <NavItem active={page === 'live'} icon={<Radio size={18} />} label="라이브 룸" onClick={() => setPage('live')} />
+          <NavItem active={page === 'live' || page === 'method'} icon={<Radio size={18} />} label="라이브 룸" onClick={() => setPage('method')} />
         </nav>
 
         <div className="sidebar-bottom">
@@ -226,7 +234,8 @@ export default function App() {
           {page === 'dashboard' && <Dashboard avatars={avatars} onCreate={() => setPage('create')} onLive={openLive} />}
           {page === 'avatars' && <AvatarLibrary avatars={avatars} onCreate={() => setPage('create')} onLive={openLive} onDelete={removeAvatar} />}
           {page === 'create' && <CreateAvatar apiOnline={apiOnline} onComplete={addAvatar} onCancel={() => setPage('avatars')} />}
-          {page === 'live' && <LiveRoom avatar={selectedAvatar} apiOnline={apiOnline} onExit={() => setPage('avatars')} />}
+          {page === 'method' && <MethodPicker avatar={selectedAvatar} selected={selectedMethod} onSelect={setSelectedMethod} onBack={() => setPage('avatars')} onStart={() => setPage('live')} />}
+          {page === 'live' && <LiveRoom avatar={selectedAvatar} method={selectedMethod} apiOnline={apiOnline} onExit={() => setPage('avatars')} />}
         </section>
       </main>
     </div>
@@ -281,6 +290,36 @@ function Dashboard({ avatars, onCreate, onLive }: { avatars: Avatar[]; onCreate:
 
 function Metric({ icon, label, value, detail }: { icon: React.ReactNode; label: string; value: string; detail: string }) {
   return <article className="metric-card"><span className="metric-icon">{icon}</span><div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div></article>
+}
+
+function MethodPicker({ avatar, selected, onSelect, onBack, onStart }: {
+  avatar: Avatar
+  selected: ConversationMethod
+  onSelect: (method: ConversationMethod) => void
+  onBack: () => void
+  onStart: () => void
+}) {
+  return (
+    <section className="method-picker">
+      <span className="eyebrow"><Radio size={15} /> START A CONVERSATION</span>
+      <h1>{avatar.name}와 대화하기</h1>
+      <p>같은 Ditto 모델을 안정화 기준선과 저지연 실시간 경로에서 비교할 수 있습니다.</p>
+      <div className="method-options">
+        <button className={`method-option ${selected === 'ditto' ? 'selected' : ''}`} onClick={() => onSelect('ditto')}>
+          <span className="method-radio" aria-hidden="true" />
+          <span><strong>Ditto Default</strong><small>검증된 기준 모드 · 전체 음성을 준비한 뒤 안정적으로 립싱크</small></span>
+          <em>안정</em>
+        </button>
+        <button className={`method-option ${selected === 'ditto_realtime' ? 'selected' : ''}`} onClick={() => onSelect('ditto_realtime')}>
+          <span className="method-radio" aria-hidden="true" />
+          <span><strong>Ditto Realtime</strong><small>스트리밍 TTS PCM과 Ditto 온라인 렌더 · 첫 발화 지연을 줄이는 실험 경로</small></span>
+          <em>실험</em>
+        </button>
+      </div>
+      <div className="method-actions"><button className="secondary-button" onClick={onBack}>뒤로</button><button className="primary-button" onClick={onStart}><Radio size={17} /> {selected === 'ditto_realtime' ? 'Ditto Realtime으로 대화 시작' : 'Ditto Default로 대화 시작'} <ArrowRight size={16} /></button></div>
+      <small className="method-note">Realtime은 Default와 별도 GPU 워커·별도 실시간 스트림을 사용합니다. 문제가 생겨도 안정화 기준 경로에는 영향을 주지 않습니다.</small>
+    </section>
+  )
 }
 
 function AvatarLibrary({ avatars, onCreate, onLive, onDelete }: { avatars: Avatar[]; onCreate: () => void; onLive: (avatar: Avatar) => void; onDelete: (avatar: Avatar) => void }) {
@@ -394,7 +433,7 @@ function Consent({ checked, onChange, children }: { checked: boolean; onChange: 
   return <label className="consent-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="fake-checkbox">{checked && <Check size={13} />}</span><span>{children}</span></label>
 }
 
-function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: boolean; onExit: () => void }) {
+function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; method: ConversationMethod; apiOnline: boolean; onExit: () => void }) {
   const [state, setState] = useState<LiveState>('connecting')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -408,10 +447,6 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
   const [realtimeActive, setRealtimeActive] = useState(false)
   const [cameraEnabled, setCameraEnabled] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
-  const [expression, setExpression] = useState<ExpressionIntent>('neutral')
-  const [headYaw, setHeadYaw] = useState(0)
-  const [nodQueued, setNodQueued] = useState(false)
-  const [lastAppliedMotion, setLastAppliedMotion] = useState<MotionPlan | undefined>()
   const [voiceSupported] = useState(() => supportsSpeechRecognition())
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const mediaRef = useRef<{ stream: MediaStream; context: AudioContext; frame: number } | null>(null)
@@ -428,7 +463,7 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
     mountedRef.current = true
     const connect = async () => {
       try {
-        const session = apiOnline ? await api.createSession(avatar.id) : { id: `local-room-${Date.now()}`, avatar_id: avatar.id, state: 'active', created_at: new Date().toISOString() }
+        const session = apiOnline ? await api.createSession(avatar.id, method) : { id: `local-room-${Date.now()}`, avatar_id: avatar.id, state: 'active', created_at: new Date().toISOString(), renderer_method: method }
         if (!mountedRef.current) return
         setSessionId(session.id)
         sessionRef.current = session.id
@@ -449,7 +484,7 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
       if (sessionRef.current && apiOnline) void api.endSession(sessionRef.current).catch(() => undefined)
       sessionRef.current = null
     }
-  }, [avatar.id, apiOnline])
+  }, [avatar.id, apiOnline, method])
 
   useEffect(() => {
     // Download the WAV while Ditto is producing its first frame, then use the
@@ -479,42 +514,49 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
     // late even when the worker PTS values are correct.
     let mediaStart: number | null = null
     let finalAudioAt = 0
-    const pendingFrames: Array<[number, ArrayBuffer]> = []
+    const pendingFrames: Array<[number, ImageBitmap]> = []
     const pendingAudio: Array<[number, ArrayBuffer]> = []
-    let latestVideoPts = -1
+    let latestDecodedVideoPts = -1
     // Ditto's online renderer can have a short GPU/encoder burst after it has
-    // started speaking.  Keeping 0.6 s ahead lets the browser absorb that
+    // started speaking. Keeping 0.6 s ahead lets the browser absorb that
     // jitter without slowing both audio and video together mid-utterance.
     const initialBufferMs = 600
     let ended = false
-    const drawAt = async (ptsMs: number, jpeg: ArrayBuffer) => {
+    const drawAt = (ptsMs: number, bitmap: ImageBitmap) => {
       if (mediaStart === null) {
-        pendingFrames.push([ptsMs, jpeg])
+        pendingFrames.push([ptsMs, bitmap])
         return
       }
       const startAt = mediaStart
-      try {
-        const bitmap = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }))
-        const draw = () => {
-          const remaining = startAt + ptsMs / 1000 - context.currentTime
-          if (remaining > 0.008) {
-            window.setTimeout(draw, Math.min(remaining * 1000, 40))
-            return
-          }
-          const canvas = realtimeCanvasRef.current
-          const ctx = canvas?.getContext('2d')
-          if (canvas && ctx) {
-            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-              canvas.width = bitmap.width
-              canvas.height = bitmap.height
-            }
-            ctx.drawImage(bitmap, 0, 0)
-          }
-          bitmap.close()
+      const draw = () => {
+        const remaining = startAt + ptsMs / 1000 - context.currentTime
+        if (remaining > 0.008) {
+          window.setTimeout(draw, Math.min(remaining * 1000, 40))
+          return
         }
-        draw()
+        const canvas = realtimeCanvasRef.current
+        const ctx = canvas?.getContext('2d')
+        if (canvas && ctx) {
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width
+            canvas.height = bitmap.height
+          }
+          ctx.drawImage(bitmap, 0, 0)
+        }
+        bitmap.close()
+      }
+      draw()
+    }
+    const decodeAndDraw = async (ptsMs: number, jpeg: ArrayBuffer) => {
+      try {
+        // Decode while the playout buffer fills. Decoding only at the visual
+        // deadline was the source of the slow-looking first seconds.
+        const bitmap = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }))
+        latestDecodedVideoPts = Math.max(latestDecodedVideoPts, ptsMs)
+        drawAt(ptsMs, bitmap)
+        startWhenBuffered()
       } catch {
-        // A dropped JPEG is preferable to delaying the media clock.
+        // A dropped JPEG is preferable to delaying the shared media clock.
       }
     }
     const scheduleAudio = (ptsMs: number, payload: ArrayBuffer) => {
@@ -531,13 +573,13 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
       finalAudioAt = at + buffer.duration
     }
     const startWhenBuffered = () => {
-      if (mediaStart !== null || latestVideoPts < initialBufferMs || pendingAudio.length === 0) return
+      if (mediaStart !== null || latestDecodedVideoPts < initialBufferMs || pendingAudio.length === 0) return
       // Keep a little media time in hand. This is a fixed startup latency,
       // not cumulative delay, and gives ImageBitmap decoding a stable lead.
-      mediaStart = context.currentTime + 0.16
+      mediaStart = context.currentTime + 0.2
       finalAudioAt = mediaStart
       for (const [pendingPts, pendingPcm] of pendingAudio.splice(0)) scheduleAudio(pendingPts, pendingPcm)
-      for (const [pendingPts, pendingJpeg] of pendingFrames.splice(0)) void drawAt(pendingPts, pendingJpeg)
+      for (const [pendingPts, pendingBitmap] of pendingFrames.splice(0)) drawAt(pendingPts, pendingBitmap)
     }
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(`${protocol}//${window.location.host}${streamPath}`)
@@ -563,9 +605,7 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
         }
         scheduleAudio(ptsMs, payload)
       } else if (kind === 2) {
-        latestVideoPts = Math.max(latestVideoPts, ptsMs)
-        void drawAt(ptsMs, payload)
-        startWhenBuffered()
+        void decodeAndDraw(ptsMs, payload)
       } else if (kind === 3) {
         ended = true
         const finishIn = Math.max(0, finalAudioAt - context.currentTime) * 1000 + 80
@@ -602,22 +642,19 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
     setCaptions((items) => [...items, { id: turnId, role: 'user', text, at: new Date() }])
     setState('thinking')
     const motionPlan: MotionPlan = {
-      expression,
-      head: { yaw_deg: headYaw, pitch_deg: 0, roll_deg: 0 },
+      expression: 'neutral',
+      head: { yaw_deg: 0, pitch_deg: 0, roll_deg: 0 },
       // Ditto v0.1 turns gaze intent into a small head cue. Independent eye
       // gaze is intentionally not advertised until it is calibrated.
       gaze: { x: 0, y: 0 },
-      ...(nodQueued ? { nod: { start_ms: 320, duration_ms: 460, amplitude_deg: 5 } } : {}),
     }
-    setNodQueued(false)
     try {
       const result = apiOnline ? await api.sendTurn(sessionId, text, motionPlan) : localTurn(text, avatar)
       if (!mountedRef.current) return
       setCaptions((items) => [...items, { id: result.turn_id, role: 'assistant', text: result.assistant_text, at: new Date() }])
-      setLastAppliedMotion(result.renderer.applied_motion ?? motionPlan)
       setState('speaking')
       const video = mediaUrl(result.renderer.stream_url)
-      if (result.renderer.stream_url?.startsWith('/avatar-stream/')) {
+      if (result.renderer.stream_url?.startsWith('/avatar-stream/') || result.renderer.stream_url?.startsWith('/avatar-stream-realtime/')) {
         setRenderedVideo(undefined)
         setRenderedAudio(undefined)
         setStreamReady(false)
@@ -718,7 +755,7 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
   return (
     <div className="live-layout">
       <section className="live-stage">
-        <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">Ditto unified motion · lip · head · expression</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
+        <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">{method === 'ditto' ? 'Ditto Default · stable lip sync' : 'Ditto Realtime · streaming TTS + online Ditto'}</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
@@ -729,15 +766,9 @@ function LiveRoom({ avatar, apiOnline, onExit }: { avatar: Avatar; apiOnline: bo
             <span><Camera size={11} /> 로컬 미리보기</span>
           </div>
           <div className="ai-watermark"><Sparkles size={13} /> AI AVATAR</div>
-          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? 'Ditto controlled · GPU' : '브라우저 미리보기'}</div></div>
+          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
         </div>
         <div className="stage-controls"><button className="round-control" aria-label={muted ? '마이크 켜기' : '마이크 끄기'} onClick={() => { setMuted((value) => !value); if (!muted) stopListening() }}>{muted ? <MicOff size={19} /> : <Mic size={19} />}</button><button className={`talk-button ${state === 'listening' ? 'active' : ''}`} disabled={state === 'connecting' || state === 'thinking'} onClick={() => { if (state === 'listening') stopListening(); else void startListening() }}>{state === 'listening' ? <><Pause size={17} /> 듣기 중지</> : isSpeaking ? <><Mic size={17} /> 끼어들어 말하기</> : <><Mic size={17} /> 길게 눌러 말하기</>}</button><button className={`round-control ${cameraEnabled ? 'active-camera' : ''}`} aria-label={cameraEnabled ? '카메라 끄기' : '카메라 켜기'} onClick={() => void toggleCamera()}>{cameraEnabled ? <Camera size={19} /> : <CameraOff size={19} />}</button><button className="round-control" aria-label="대화 종료" onClick={onExit}><X size={20} /></button></div>
-        <div className="ditto-control-deck" aria-label="Ditto 동작 제어">
-          <div className="control-deck-head"><div><span className="eyebrow subtle">DITTO MOTION PLAN</span><strong>다음 응답의 동작</strong></div><small>안전 범위 내에서 worker에 전달</small></div>
-          <div className="motion-control-row"><div className="control-group"><span>표정 의도</span><div className="segmented-control">{(['neutral', 'warm', 'concern'] as ExpressionIntent[]).map((item) => <button key={item} className={expression === item ? 'active' : ''} onClick={() => setExpression(item)}>{item === 'neutral' ? '중립' : item === 'warm' ? '따뜻함' : '공감'}</button>)}</div></div><div className="control-group"><span>고개 방향</span><div className="pose-stepper"><button onClick={() => setHeadYaw((value) => Math.max(-12, value - 3))}>←</button><strong>{headYaw > 0 ? `+${headYaw}` : headYaw}°</strong><button onClick={() => setHeadYaw((value) => Math.min(12, value + 3))}>→</button></div></div><div className="control-group nod-control"><span>경청 nod</span><button className={nodQueued ? 'nod-armed' : ''} onClick={() => setNodQueued((value) => !value)}>{nodQueued ? '다음 응답에 적용' : '작은 nod 예약'}</button></div></div>
-          <p>카메라 영상은 현재 이 브라우저에서만 미리보기로 사용합니다. 시선은 v0.1에서 작은 head cue로만 반영하며, 독립 eye-gaze 제어는 calibration 뒤 활성화합니다.</p>
-        </div>
-        <div className="motion-status" aria-label="아바타 렌더링 파이프라인 상태"><span><i /> 음성 → unified motion</span><b>→</b><span><i /> pose · expression · lip</span><b>→</b><span><i /> Ditto online stream</span>{lastAppliedMotion && <span className="motion-applied">적용: {lastAppliedMotion.expression}{lastAppliedMotion.nod ? ' · nod' : ''}</span>}</div>
         {interim && <div className="interim-caption"><AudioLines size={16} /><span>{interim}</span></div>}
         {cameraError && <div className="camera-note"><CameraOff size={14} /> {cameraError}</div>}
       </section>

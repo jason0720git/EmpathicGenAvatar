@@ -32,7 +32,10 @@ export interface LiveSession {
   avatar_id: string
   state: 'active' | 'ended'
   created_at: string
+  renderer_method: RendererMethod
 }
+
+export type RendererMethod = 'ditto' | 'ditto_realtime' | 'fast'
 
 export type ExpressionIntent = 'neutral' | 'warm' | 'concern'
 

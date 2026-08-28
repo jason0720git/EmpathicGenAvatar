@@ -19,6 +19,8 @@ class Settings:
     app_env: str = "development"
     api_access_token: str | None = None
     worker_shared_token: str | None = None
+    fast_avatar_renderer_url: str | None = None
+    realtime_avatar_renderer_url: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -29,6 +31,8 @@ class Settings:
         if engine not in {"preview", "remote"}:
             raise ValueError("AVATAR_ENGINE must be 'preview' or 'remote'")
         renderer_url = os.getenv("AVATAR_RENDERER_URL") or None
+        fast_renderer_url = os.getenv("FAST_AVATAR_RENDERER_URL") or None
+        realtime_renderer_url = os.getenv("REALTIME_AVATAR_RENDERER_URL") or None
         if engine == "remote" and not renderer_url:
             raise ValueError("AVATAR_RENDERER_URL is required when AVATAR_ENGINE=remote")
         app_env = os.getenv("APP_ENV", "development").strip().lower()
@@ -46,4 +50,6 @@ class Settings:
             app_env=app_env,
             api_access_token=api_access_token,
             worker_shared_token=os.getenv("WORKER_SHARED_TOKEN") or None,
+            fast_avatar_renderer_url=fast_renderer_url.rstrip("/") if fast_renderer_url else None,
+            realtime_avatar_renderer_url=realtime_renderer_url.rstrip("/") if realtime_renderer_url else None,
         )

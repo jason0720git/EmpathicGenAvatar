@@ -53,6 +53,7 @@ def test_avatar_lifecycle_and_turn_do_not_store_transcript(tmp_path):
         session_response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]})
         assert session_response.status_code == 201
         session = session_response.json()
+        assert session["renderer_method"] == "ditto"
         turn_response = client.post(f"/api/live/sessions/{session['id']}/turns", json={"text": "안녕하세요"})
         assert turn_response.status_code == 200
         turn = turn_response.json()
@@ -118,3 +119,19 @@ def test_turn_accepts_bounded_motion_plan(tmp_path):
         applied = response.json()["renderer"]["applied_motion"]
         assert applied["expression"] == "concern"
         assert applied["nod"]["amplitude_deg"] == 5
+
+
+def test_fast_session_requires_deployed_fast_renderer(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"], "renderer_method": "fast"})
+        assert response.status_code == 409
+        assert "Fast Live" in response.json()["detail"]
+
+
+def test_realtime_session_requires_deployed_realtime_renderer(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"], "renderer_method": "ditto_realtime"})
+        assert response.status_code == 409
+        assert "Ditto Realtime" in response.json()["detail"]

@@ -5,9 +5,12 @@ import contextlib
 import hashlib
 import json
 import os
+import queue
+import re
 import secrets
 import struct
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -114,7 +117,7 @@ class CancelIn(BaseModel):
 @dataclass(frozen=True)
 class WorkerConfig:
     data_root: Path
-    mode: Literal["stub", "ditto_batch", "ditto_live", "musetalk_live"]
+    mode: Literal["stub", "ditto_batch", "ditto_live", "ditto_realtime", "musetalk_live"]
     ditto_root: Path
     model_root: Path
     config_path: Path
@@ -130,8 +133,8 @@ class WorkerConfig:
     @classmethod
     def from_env(cls) -> "WorkerConfig":
         mode = os.getenv("AVATAR_RENDER_MODE", "stub").lower()
-        if mode not in {"stub", "ditto_batch", "ditto_live", "musetalk_live"}:
-            raise ValueError("AVATAR_RENDER_MODE must be stub, ditto_batch, ditto_live, or musetalk_live")
+        if mode not in {"stub", "ditto_batch", "ditto_live", "ditto_realtime", "musetalk_live"}:
+            raise ValueError("AVATAR_RENDER_MODE must be stub, ditto_batch, ditto_live, ditto_realtime, or musetalk_live")
         # Ditto's public default is aimed at offline quality.  Four steps is
         # our explicit conversational preset: it materially reduces the
         # first-audio-frame wait while retaining enough denoising for the
@@ -603,6 +606,267 @@ class DittoLiveRuntime:
         return body()
 
 
+class RealtimePcmTimeline:
+    """Audio-owned PTS timeline shared by the realtime TTS and Ditto paths.
+
+    The renderer may generate JPEGs in bursts.  This object releases 40-ms
+    PCM packets only after their matching video PTS has been accepted, so a
+    fast GPU burst can never leave the mouth running after the audio ends.
+    """
+
+    def __init__(self) -> None:
+        self._samples = np.zeros((0,), dtype=np.int16)
+        self._complete = False
+        self._cancelled = False
+        self._next_packet_sample = 0
+        self._lock = threading.Lock()
+
+    def append(self, samples: np.ndarray) -> None:
+        if not len(samples):
+            return
+        with self._lock:
+            self._samples = np.concatenate([self._samples, samples.astype(np.int16, copy=False)])
+
+    def finish(self) -> None:
+        with self._lock:
+            self._complete = True
+
+    def frame_count(self) -> int:
+        """Number of 25-fps video frames required by the registered PCM."""
+        with self._lock:
+            return max(1, int(np.ceil(len(self._samples) / 640)))
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            self._complete = True
+
+    def accepts_video(self, pts_ms: int) -> bool:
+        with self._lock:
+            if self._cancelled:
+                return False
+            if not self._complete:
+                return True
+            return pts_ms < max(40, int(np.ceil(len(self._samples) / 640)) * 40)
+
+    def audio_packets_through(self, pts_ms: int) -> list[tuple[int, bytes]]:
+        """Return PCM blocks that have a matching generated video frame."""
+        packets: list[tuple[int, bytes]] = []
+        with self._lock:
+            max_sample = min(len(self._samples), ((pts_ms // 40) + 1) * 640)
+            while self._next_packet_sample < max_sample:
+                start = self._next_packet_sample
+                end = min(start + 640, len(self._samples))
+                packets.append((start * 1000 // 16_000, self._samples[start:end].tobytes()))
+                self._next_packet_sample = end
+        return packets
+
+
+class DittoRealtimeRuntime(DittoLiveRuntime):
+    """Ditto online mode fed by incremental TTS PCM instead of a complete WAV.
+
+    This is intentionally a separate worker mode from ``ditto_live``.  The
+    stable renderer remains the rollback/reference path; this runtime tests
+    the production-shaped sequence: first sentence TTS → Ditto PCM chunks →
+    timestamped JPEG/PCM packets.  eSpeak is retained only as an offline-free
+    TTS adapter for the prototype and can be replaced with a streaming neural
+    TTS service without changing the media clock.
+    """
+
+    def __init__(self, config: WorkerConfig):
+        super().__init__(config)
+        self._session_turns: dict[str, str] = {}
+        self._timelines: dict[str, RealtimePcmTimeline] = {}
+
+    @staticmethod
+    def _speech_segments(text: str) -> list[str]:
+        # Give the first renderer call enough phonetic context (~0.3 s) while
+        # not waiting for a long answer. Korean punctuation is included.
+        parts = [part.strip() for part in re.split(r"(?<=[.!?。！？])\\s+", text.strip()) if part.strip()]
+        if not parts:
+            return []
+        segments: list[str] = []
+        for part in parts:
+            while len(part) > 42:
+                cut = max(part.rfind(" ", 18, 42), 18)
+                segments.append(part[:cut].strip())
+                part = part[cut:].strip()
+            if part:
+                segments.append(part)
+        return segments
+
+    async def _synthesize_pcm(self, text: str, output: Path) -> np.ndarray:
+        await self.synthesize(text, output)
+        with wave.open(str(output), "rb") as wav:
+            raw = wav.readframes(wav.getnframes())
+            channels, width, sample_rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+        if channels == 1 and width == 2 and sample_rate == 16_000:
+            return np.frombuffer(raw, dtype=np.int16).copy()
+        import librosa
+        normalized, _ = librosa.load(str(output), sr=16_000, mono=True)
+        return np.clip(normalized * 32767.0, -32768, 32767).astype(np.int16)
+
+    async def start(self, body: RenderIn, source: Path, audio_dir: Path) -> tuple[str, str | None]:
+        # Session creation has already warmed this registration. Keep the
+        # defensive prepare call for direct worker clients/restarts.
+        await self.prepare(body.avatar_id, source)
+        frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
+        packets: asyncio.Queue[tuple[str, int, bytes]] = asyncio.Queue(maxsize=1024)
+        websocket_connected = asyncio.Event()
+        playback_started = asyncio.Event()
+        turn = LiveTurn(
+            frames=frames,
+            audio=audio_dir / f"{body.turn_id}.realtime.wav",
+            task=asyncio.create_task(asyncio.sleep(0), name=f"ditto-realtime-placeholder-{body.turn_id}"),
+            packets=packets,
+            websocket_connected=websocket_connected,
+            playback_started=playback_started,
+            video_pts=asyncio.Queue(maxsize=1024),
+        )
+        timeline = RealtimePcmTimeline()
+        task = asyncio.create_task(self._run_realtime(body, turn, timeline, audio_dir), name=f"ditto-realtime-{body.turn_id}")
+        turn.task = task
+        self.turns[body.turn_id] = turn
+        self._timelines[body.turn_id] = timeline
+        if body.session_id:
+            self._session_turns[body.session_id] = body.turn_id
+        task.add_done_callback(self._report_task_error)
+        return f"/avatar-stream/v1/live/{body.turn_id}", None
+
+    async def _run_realtime(self, body: RenderIn, turn: LiveTurn, timeline: RealtimePcmTimeline, audio_dir: Path) -> None:
+        assert turn.websocket_connected is not None and turn.packets is not None
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(turn.websocket_connected.wait(), timeout=2.0)
+        if not turn.websocket_connected.is_set():
+            return
+
+        pcm_input: queue.Queue[np.ndarray | None] = queue.Queue()
+        render_task: asyncio.Task[None] | None = None
+        try:
+            segments = self._speech_segments(body.text)
+            if not segments:
+                raise RuntimeError("Realtime Ditto received no TTS text")
+
+            # Ditto's motion planner needs the exact media duration.  The
+            # former per-sentence feed used a character-count estimate, so a
+            # long voice could outlast the generated motion.  Run the tiny
+            # local TTS fragments concurrently, concatenate in text order,
+            # then make PCM duration the sole source of truth for both tracks.
+            pcm_parts = await asyncio.gather(*(
+                self._synthesize_pcm(segment, audio_dir / f"{body.turn_id}-{index}.wav")
+                for index, segment in enumerate(segments)
+            ))
+            pcm = np.concatenate(pcm_parts) if len(pcm_parts) > 1 else pcm_parts[0]
+            timeline.append(pcm)
+            timeline.finish()
+            render_task = asyncio.create_task(
+                asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, pcm_input),
+                name=f"ditto-realtime-sdk-{body.turn_id}",
+            )
+            pcm_input.put(pcm)
+            pcm_input.put(None)
+            await render_task
+            # Allow thread-safe frame callbacks to enter the asyncio queue
+            # before publishing end-of-turn to the browser.
+            await asyncio.sleep(0)
+        except Exception:
+            pcm_input.put(None)
+            if render_task is not None:
+                render_task.cancel()
+            raise
+        finally:
+            timeline.finish()
+        if turn.websocket_connected.is_set():
+            await turn.packets.put(("end", 0, b""))
+
+    async def cancel(self, session_id: str) -> None:
+        turn_id = self._session_turns.pop(session_id, None)
+        if turn_id is None:
+            return
+        timeline = self._timelines.get(turn_id)
+        if timeline:
+            timeline.cancel()
+        turn = self.turns.get(turn_id)
+        if turn and not turn.task.done():
+            turn.task.cancel()
+
+    def _run_realtime_sdk(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        body: RenderIn,
+        turn: LiveTurn,
+        timeline: RealtimePcmTimeline,
+        pcm_input: queue.Queue[np.ndarray | None],
+    ) -> None:
+        assert turn.packets is not None and turn.playback_started is not None
+        sdk = self._load_sdk()
+
+        def publish(kind: str, pts_ms: int, payload: bytes) -> None:
+            if kind != "video" or not timeline.accepts_video(pts_ms):
+                return
+            with contextlib.suppress(asyncio.QueueFull):
+                turn.packets.put_nowait(("video", pts_ms, payload))
+            for audio_pts, audio_payload in timeline.audio_packets_through(pts_ms):
+                with contextlib.suppress(asyncio.QueueFull):
+                    turn.packets.put_nowait(("audio", audio_pts, audio_payload))
+
+        # PCM duration is the clock contract.  This gives MotionStitch the
+        # same endpoint as audio and clips its causal tail to that endpoint.
+        target_frames = timeline.frame_count()
+        motion_plan = body.motion_plan or MotionPlan()
+        ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=DITTO_PREROLL_FRAMES)
+        sink = MjpegFrameSink(
+            loop,
+            turn.frames,
+            expected_frames=target_frames,
+            packet_sink=publish,
+            playback_started=turn.playback_started,
+            skip_initial_frames=DITTO_PREROLL_FRAMES,
+            pace_output=False,
+        )
+        sdk.setup(
+            "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
+            sampling_timesteps=self.config.sampling_timesteps,
+            emo=DITTO_EMOTION_INDEX[motion_plan.expression], ctrl_info=ctrl_info,
+        )
+        sdk.setup_Nd(target_frames, ctrl_info=ctrl_info)
+        # Ditto consumes a 6,480-sample causal window and advances 3,200
+        # samples. Keep exactly that rolling overlap across TTS fragments.
+        window_samples = int(sum(DITTO_CHUNKSIZE) * .04 * 16_000) + 80
+        stride_samples = DITTO_CHUNKSIZE[1] * 640
+        rolling = np.zeros((DITTO_CHUNKSIZE[0] * 640,), dtype=np.float32)
+        try:
+            done = False
+            while not done:
+                item = pcm_input.get()
+                if item is None:
+                    done = True
+                else:
+                    rolling = np.concatenate([rolling, item.astype(np.float32) / 32768.0])
+                while len(rolling) >= window_samples:
+                    sdk.run_chunk(rolling[:window_samples], DITTO_CHUNKSIZE)
+                    rolling = rolling[stride_samples:]
+            if len(rolling):
+                sdk.run_chunk(np.pad(rolling, (0, max(0, window_samples - len(rolling))))[:window_samples], DITTO_CHUNKSIZE)
+            # The online pipeline has a short causal tail. One additional
+            # silent window supplies those final closing-mouth frames; the
+            # exact sink limit prevents it from lengthening the utterance.
+            # Without it, the pipeline consistently ended about four frames
+            # short of the PCM clock on long answers.
+            if sink.frame_count < target_frames:
+                sdk.run_chunk(np.zeros((window_samples,), dtype=np.float32), DITTO_CHUNKSIZE)
+        finally:
+            sdk.close()
+            sink.close()
+            first = None if sink.first_frame_at is None else round(sink.first_frame_at - sink.started_at, 3)
+            print(
+                "Ditto realtime metrics: "
+                f"turn={body.turn_id} first_frame_s={first} "
+                f"target_frames={target_frames} emitted_frames={sink.frame_count} "
+                f"dropped_tail={sink.dropped_tail_frames}",
+                flush=True,
+            )
+
 class MuseTalkLiveRuntime:
     """Persistent one-photo MuseTalk 1.5 media path.
 
@@ -657,15 +921,47 @@ class MuseTalkLiveRuntime:
         audio = audio_dir / f"{body.turn_id}-{uuid.uuid4().hex[:8]}.wav"
         await self.synthesize(body.text, audio)
         frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
-        task = asyncio.create_task(self._run(body.avatar_id, body.turn_id, audio, frames), name=f"musetalk-live-{body.turn_id}")
-        self.turns[body.turn_id] = LiveTurn(frames=frames, audio=audio, task=task)
+        packets: asyncio.Queue[tuple[str, int, bytes]] = asyncio.Queue(maxsize=1024)
+        video_pts: asyncio.Queue[int] = asyncio.Queue(maxsize=1024)
+        websocket_connected = asyncio.Event()
+        playback_started = asyncio.Event()
+        placeholder = asyncio.create_task(asyncio.sleep(0), name=f"musetalk-live-placeholder-{body.turn_id}")
+        turn = LiveTurn(
+            frames=frames, audio=audio, task=placeholder, packets=packets,
+            websocket_connected=websocket_connected, playback_started=playback_started, video_pts=video_pts,
+        )
+        task = asyncio.create_task(self._run(body.avatar_id, body.turn_id, audio, turn), name=f"musetalk-live-{body.turn_id}")
+        turn.task = task
+        self.turns[body.turn_id] = turn
         task.add_done_callback(DittoLiveRuntime._report_task_error)
-        return f"/v1/assets/live/{body.turn_id}", f"/v1/assets/audio/{audio.name}"
+        # RemoteRenderer recognizes the same private socket shape as Ditto
+        # and remaps it to /avatar-stream-fast/ for this worker. Audio and
+        # video packets use the same 25-fps clock.
+        return f"/avatar-stream/v1/live/{body.turn_id}", f"/v1/assets/audio/{audio.name}"
 
-    async def _run(self, avatar_id: str, turn_id: str, audio: Path, frames: asyncio.Queue[bytes]) -> None:
+    async def _run(self, avatar_id: str, turn_id: str, audio: Path, turn: LiveTurn) -> None:
+        assert turn.websocket_connected is not None and turn.playback_started is not None and turn.packets is not None and turn.video_pts is not None
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(turn.websocket_connected.wait(), timeout=2.0)
+
+        def packet_sink(kind: str, pts_ms: int, payload: bytes) -> None:
+            if not turn.websocket_connected.is_set():
+                return
+            with contextlib.suppress(asyncio.QueueFull):
+                turn.packets.put_nowait((kind, pts_ms, payload))
+            if kind == "video":
+                with contextlib.suppress(asyncio.QueueFull):
+                    turn.video_pts.put_nowait(pts_ms)
+
+        audio_task = asyncio.create_task(self._pump_pcm(audio, turn), name=f"musetalk-audio-{turn_id}") if turn.websocket_connected.is_set() else None
         async with self.lock:
             loop = asyncio.get_running_loop()
-            sink = MjpegFrameSink(loop, frames)
+            with wave.open(str(audio), "rb") as wav:
+                expected_frames = max(1, int(np.ceil(wav.getnframes() / wav.getframerate() * 25)))
+            sink = MjpegFrameSink(
+                loop, turn.frames, expected_frames=expected_frames, packet_sink=packet_sink,
+                playback_started=turn.playback_started, pace_output=False,
+            )
             try:
                 rendered = await asyncio.to_thread(self._load().render, avatar_id, audio, sink)
                 if rendered < 1:
@@ -674,6 +970,31 @@ class MuseTalkLiveRuntime:
                 sink.close()
                 first = None if sink.first_frame_at is None else round(sink.first_frame_at - sink.started_at, 3)
                 print(f"MuseTalk live turn metrics: turn={turn_id} first_frame_s={first} frames={sink.frame_count}", flush=True)
+        if audio_task is not None:
+            await audio_task
+        if turn.websocket_connected.is_set():
+            await turn.packets.put(("end", 0, b""))
+
+    async def _pump_pcm(self, audio: Path, turn: LiveTurn) -> None:
+        """Release 40-ms audio blocks only once their visual PTS exists."""
+        assert turn.packets is not None and turn.playback_started is not None and turn.video_pts is not None
+        with wave.open(str(audio), "rb") as wav:
+            raw = wav.readframes(wav.getnframes())
+            channels, width, sample_rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+        if channels == 1 and width == 2 and sample_rate == 16000:
+            samples = np.frombuffer(raw, dtype=np.int16)
+        else:
+            import librosa
+            normalized, _ = librosa.load(str(audio), sr=16000, mono=True)
+            samples = np.clip(normalized * 32767.0, -32768, 32767).astype(np.int16)
+        await turn.playback_started.wait()
+        for start in range(0, len(samples), 640):
+            pts_ms = start * 1000 // 16000
+            while True:
+                video_pts = await turn.video_pts.get()
+                if video_pts >= pts_ms:
+                    break
+            await turn.packets.put(("audio", pts_ms, samples[start:start + 640].tobytes()))
 
     async def cancel(self, session_id: str) -> None:
         for turn in self.turns.values():
@@ -710,11 +1031,10 @@ def create_app() -> FastAPI:
     config = WorkerConfig.from_env()
     cache = CacheStore(config.data_root / "avatar-cache")
     runtime = DittoBatchRuntime(config)
-    # `ditto_batch` is Ditto's official offline pipeline: it produces a single
-    # MP4 with the exact input WAV muxed in, which is the sync reference path.
-    # The MJPEG adapter remains available behind `ditto_live` while its
-    # incremental PCM/clocking implementation is benchmarked separately.
+    # `ditto_live` is the stable/default reference. `ditto_realtime` keeps
+    # the same image-to-motion model but receives incremental TTS PCM.
     live_runtime = DittoLiveRuntime(config) if config.mode == "ditto_live" else None
+    realtime_runtime = DittoRealtimeRuntime(config) if config.mode == "ditto_realtime" else None
     musetalk_runtime = MuseTalkLiveRuntime(config) if config.mode == "musetalk_live" else None
     renders = config.data_root / "rendered"
     audio_assets = config.data_root / "audio"
@@ -747,6 +1067,8 @@ def create_app() -> FastAPI:
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         if live_runtime:
             await live_runtime.prepare(body.avatar_id, source)
+        if realtime_runtime:
+            await realtime_runtime.prepare(body.avatar_id, source)
         if musetalk_runtime:
             await musetalk_runtime.prepare(body.avatar_id, source)
         renderer_name = "musetalk" if musetalk_runtime else "ditto"
@@ -766,7 +1088,16 @@ def create_app() -> FastAPI:
         if live_runtime:
             stream_url, audio_url = await live_runtime.start(body, source, audio_assets)
             return {
-                "status": "streaming-mjpeg-ditto-controlled",
+                "status": "streaming-ws-ditto-controlled",
+                "stream_url": stream_url,
+                "audio_url": audio_url,
+                "visemes": [],
+                "applied_motion": (body.motion_plan or MotionPlan()).model_dump(mode="json"),
+            }
+        if realtime_runtime:
+            stream_url, audio_url = await realtime_runtime.start(body, source, audio_assets)
+            return {
+                "status": "streaming-ws-ditto-realtime",
                 "stream_url": stream_url,
                 "audio_url": audio_url,
                 "visemes": [],
@@ -775,7 +1106,7 @@ def create_app() -> FastAPI:
         if musetalk_runtime:
             stream_url, audio_url = await musetalk_runtime.start(body, source, audio_assets)
             return {
-                "status": "streaming-mjpeg-musetalk",
+                "status": "streaming-ws-musetalk",
                 "stream_url": stream_url,
                 "audio_url": audio_url,
                 "visemes": [],
@@ -803,6 +1134,8 @@ def create_app() -> FastAPI:
         await runtime.cancel(body.session_id)
         if live_runtime:
             await live_runtime.cancel(body.session_id)
+        if realtime_runtime:
+            await realtime_runtime.cancel(body.session_id)
         if musetalk_runtime:
             await musetalk_runtime.cancel(body.session_id)
         return {"state": "ready"}
@@ -814,7 +1147,7 @@ def create_app() -> FastAPI:
             if not secrets.compare_digest(supplied, config.shared_token):
                 await websocket.close(code=1008)
                 return
-        active_runtime = live_runtime or musetalk_runtime
+        active_runtime = realtime_runtime or live_runtime or musetalk_runtime
         if active_runtime is None:
             await websocket.close(code=1008)
             return
@@ -837,7 +1170,7 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/assets/live/{turn_id}")
     async def live_asset(turn_id: str) -> StreamingResponse:
-        active_runtime = musetalk_runtime or live_runtime
+        active_runtime = realtime_runtime or musetalk_runtime or live_runtime
         if not active_runtime:
             raise HTTPException(status_code=404, detail="live renderer not enabled")
         try:

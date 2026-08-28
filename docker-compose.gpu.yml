@@ -9,9 +9,12 @@ services:
     environment:
       AVATAR_ENGINE: remote
       AVATAR_RENDERER_URL: http://avatar-worker:8010
+      REALTIME_AVATAR_RENDERER_URL: http://avatar-worker-realtime:8010
       WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
     depends_on:
       avatar-worker:
+        condition: service_healthy
+      avatar-worker-realtime:
         condition: service_healthy
 
   avatar-worker:
@@ -49,6 +52,32 @@ services:
       - ./models:/models:ro
       - ./vendor/MuseTalk:/opt/musetalk:ro
       - ./vendor/LivePortrait:/opt/liveportrait:ro
+    gpus: all
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # Ditto Realtime is isolated from Ditto Default so that latency experiments
+  # cannot alter the proven baseline renderer.
+  avatar-worker-realtime:
+    build:
+      context: ./workers/avatar
+      args:
+        BASE_IMAGE: ${DITTO_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:25.02-py3}
+    environment:
+      AVATAR_DATA_ROOT: /data
+      AVATAR_RENDER_MODE: ditto_realtime
+      DITTO_ROOT: /opt/ditto
+      DITTO_MODEL_ROOT: /models/ditto/ditto_pytorch
+      DITTO_CONFIG: /models/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl
+      DITTO_SAMPLING_TIMESTEPS: ${DITTO_REALTIME_SAMPLING_TIMESTEPS:-4}
+      WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
+    volumes:
+      - avatar-data:/data
+      - ./vendor/ditto-talkinghead:/opt/ditto:ro
+      - ./models:/models:ro
     gpus: all
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health')"]
