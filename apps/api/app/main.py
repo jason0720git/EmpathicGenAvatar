@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import mimetypes
 import secrets
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +16,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 import httpx
 
 from .conversation import ConversationProvider, OllamaConversation, SafeDemoConversation
-from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut
+from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn
 from .quality import ImageValidationError, inspect_image
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
 from .settings import Settings
@@ -33,10 +35,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) if config.realtime_avatar_renderer_url else None
     conversation: ConversationProvider = OllamaConversation(config.ollama_url, config.ollama_model) if config.ollama_url else SafeDemoConversation()
     upload_dir = config.data_dir / "uploads"
+    telemetry_path = config.data_dir / "telemetry" / "turn-events.jsonl"
+    telemetry_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         upload_dir.mkdir(parents=True, exist_ok=True)
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
         store.initialize()
         yield
 
@@ -66,6 +71,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health", response_model=HealthOut)
     async def health() -> HealthOut:
         return HealthOut(status="ok", engine=renderer.mode, llm=conversation.name)
+
+    @app.post("/api/telemetry/turn", status_code=204)
+    async def record_turn_telemetry(body: TurnTelemetryIn) -> Response:
+        # Privacy boundary: this endpoint accepts timing/status fields only.
+        # It never receives prompt text, TTS PCM, or JPEG/video payloads.
+        record = {"turn_id": body.turn_id, "event": body.event, "elapsed_ms": body.elapsed_ms, "details": body.details}
+        with telemetry_lock:
+            with telemetry_path.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return Response(status_code=204)
 
     @app.get("/api/avatars", response_model=list[AvatarOut])
     async def list_avatars() -> list[AvatarOut]:
@@ -197,7 +212,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     await selected_renderer.prepare(avatar, source_path)
                 except Exception as error:
-                    label = "Ditto Realtime" if body.renderer_method == "ditto_realtime" else "Fast Live" if body.renderer_method == "fast" else "Ditto Default"
+                    label = "Ditto Realtime Fast Lane" if body.renderer_method == "ditto_realtime_fast" else "Ditto Realtime" if body.renderer_method == "ditto_realtime" else "Fast Live" if body.renderer_method == "fast" else "Ditto Default"
                     raise HTTPException(status_code=502, detail=f"{label} GPU 아바타 준비에 실패했습니다.") from error
         return store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method)
 
@@ -208,7 +223,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail="종료된 세션입니다.")
         avatar = _avatar_or_404(store, session.avatar_id)
         selected_renderer = _renderer_for_method(session.renderer_method, renderer, realtime_renderer, fast_renderer)
-        turn_id = str(uuid.uuid4())
+        turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
         assistant_text = await conversation.respond(persona=avatar.persona, user_text=body.text.strip())
         if not store.is_active_turn(session_id, turn_id):
@@ -313,9 +328,11 @@ def _avatar_or_404(store: Store, avatar_id: str) -> AvatarOut:
 
 
 def _renderer_for_method(method: str, ditto_renderer: AvatarRenderer, realtime_renderer: AvatarRenderer | None, fast_renderer: AvatarRenderer | None) -> AvatarRenderer:
-    if method == "ditto_realtime":
+    if method in {"ditto_realtime", "ditto_realtime_fast"}:
         if realtime_renderer is None:
             raise HTTPException(status_code=409, detail="Ditto Realtime renderer가 아직 배포되지 않았습니다.")
+        if method == "ditto_realtime_fast" and isinstance(realtime_renderer, RemoteRenderer):
+            return RemoteRenderer(realtime_renderer.base_url, realtime_renderer.shared_token, realtime_renderer.stream_prefix, render_profile="fast")
         return realtime_renderer
     if method == "fast":
         if fast_renderer is None:

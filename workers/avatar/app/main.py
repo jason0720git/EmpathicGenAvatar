@@ -15,7 +15,7 @@ import time
 import traceback
 import uuid
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -39,6 +39,9 @@ class RenderIn(BaseModel):
     session_id: str | None = None
     audio_path: str | None = None
     text: str = Field(default="", max_length=4_000)
+    # Deliberately a named product preset, never an arbitrary client-supplied
+    # diffusion-step count. This keeps the quality baseline reproducible.
+    render_profile: Literal["quality", "fast", "fast_preroll9", "fast_preroll5"] = "quality"
     motion_plan: "MotionPlan | None" = None
 
 
@@ -122,6 +125,9 @@ class WorkerConfig:
     model_root: Path
     config_path: Path
     sampling_timesteps: int
+    fast_sampling_timesteps: int
+    warm_media_path: bool
+    profile_first_turn: bool
     musetalk_root: Path
     musetalk_model_root: Path
     musetalk_batch_size: int
@@ -143,6 +149,9 @@ class WorkerConfig:
         sampling_timesteps = int(os.getenv("DITTO_SAMPLING_TIMESTEPS", "4"))
         if not 1 <= sampling_timesteps <= 50:
             raise ValueError("DITTO_SAMPLING_TIMESTEPS must be between 1 and 50")
+        fast_sampling_timesteps = int(os.getenv("DITTO_FAST_SAMPLING_TIMESTEPS", "2"))
+        if not 1 <= fast_sampling_timesteps < sampling_timesteps:
+            raise ValueError("DITTO_FAST_SAMPLING_TIMESTEPS must be at least 1 and lower than DITTO_SAMPLING_TIMESTEPS")
         return cls(
             data_root=Path(os.getenv("AVATAR_DATA_ROOT", "/data")).resolve(),
             mode=mode,
@@ -150,6 +159,9 @@ class WorkerConfig:
             model_root=Path(os.getenv("DITTO_MODEL_ROOT", "/models/ditto/ditto_pytorch")).resolve(),
             config_path=Path(os.getenv("DITTO_CONFIG", "/models/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl")).resolve(),
             sampling_timesteps=sampling_timesteps,
+            fast_sampling_timesteps=fast_sampling_timesteps,
+            warm_media_path=os.getenv("DITTO_WARM_MEDIA_PATH", "false").strip().lower() in {"1", "true", "yes"},
+            profile_first_turn=os.getenv("DITTO_PROFILE_FIRST_TURN", "false").strip().lower() in {"1", "true", "yes"},
             musetalk_root=Path(os.getenv("MUSETALK_ROOT", "/opt/musetalk")).resolve(),
             musetalk_model_root=Path(os.getenv("MUSETALK_MODEL_ROOT", "/models/musetalk")).resolve(),
             musetalk_batch_size=max(1, int(os.getenv("MUSETALK_BATCH_SIZE", "8"))),
@@ -378,43 +390,85 @@ class DittoLiveRuntime:
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=13)
         self.avatar_sources[avatar_id] = source_info
 
-    def _warm_avatar(self, avatar_id: str) -> None:
+    def _warm_avatar(self, avatar_id: str, loop: asyncio.AbstractEventLoop) -> None:
         """Move lazy CUDA/ONNX/PyTorch work out of the first spoken turn.
 
         Ditto creates its per-turn workers lazily.  Without this small silent
         pass, the first conversational turn pays for allocator setup, kernel
         selection and the first Audio2Motion execution before it can emit a
-        frame.  Avatar preparation already runs before the avatar is marked
+        frame. Avatar preparation already runs before the avatar is marked
         ready, so this is the right place to pay that one-time cost.
+
+        ``DITTO_WARM_MEDIA_PATH=true`` enables an extended experiment that
+        also primes color conversion, JPEG encoding, and the event-loop packet
+        callback. It remains opt-in because the first experiment did not lower
+        Ditto's intrinsic first-frame inference time enough to justify adding
+        this work to every session preparation by default.
         """
         if avatar_id in self.warmed_avatars:
             return
         sdk = self._load_sdk()
         chunksize = DITTO_CHUNKSIZE
         window_samples = int(sum(chunksize) * 0.04 * 16000) + 80
-        sink = DiscardFrameSink()
         started = time.monotonic()
+        warm_plan = MotionPlan()
+        if self.config.warm_media_path:
+            frames: asyncio.Queue[bytes] = asyncio.Queue(maxsize=1)
+            # One emitted frame is enough to warm the visible delivery path.
+            # The bounded queue and no-op packet consumer retain no media and
+            # never expose this silent dry-run to a browser.
+            sink: MjpegFrameSink | DiscardFrameSink = MjpegFrameSink(
+                loop,
+                frames,
+                expected_frames=1,
+                packet_sink=lambda _kind, _pts, _payload: None,
+                skip_initial_frames=DITTO_PREROLL_FRAMES,
+                pace_output=False,
+            )
+            warm_frames = DITTO_PREROLL_FRAMES + 12
+            ctrl_info = build_ditto_ctrl_info(warm_plan, warm_frames, frame_offset=DITTO_PREROLL_FRAMES)
+            warm_windows = 6
+        else:
+            sink = DiscardFrameSink()
+            warm_frames = 10
+            ctrl_info = {}
+            warm_windows = 2
         sdk.setup(
             "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
             sampling_timesteps=self.config.sampling_timesteps,
-            emo=DITTO_EMOTION_INDEX["neutral"], ctrl_info={},
+            emo=DITTO_EMOTION_INDEX[warm_plan.expression], ctrl_info=ctrl_info,
         )
         try:
-            # Two causal windows are enough to execute the feature extractor,
-            # diffusion path, warp/decode and writer workers at least once.
-            sdk.setup_Nd(10, ctrl_info={})
+            sdk.setup_Nd(warm_frames, ctrl_info=ctrl_info)
             silence = np.zeros((window_samples,), dtype=np.float32)
-            sdk.run_chunk(silence, chunksize)
-            sdk.run_chunk(silence, chunksize)
+            for _ in range(warm_windows):
+                sdk.run_chunk(silence, chunksize)
+                if self.config.warm_media_path and isinstance(sink, MjpegFrameSink) and sink.frame_count:
+                    break
         finally:
             sdk.close()
+            sink.close()
         self.warmed_avatars.add(avatar_id)
-        print(f"Ditto avatar warm-up: avatar={avatar_id} elapsed_s={time.monotonic() - started:.3f}", flush=True)
+        print(
+            "Ditto avatar warm-up: " + json.dumps({
+                "avatar_id": avatar_id,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                "media_path_enabled": self.config.warm_media_path,
+                "source_frames": sink.source_frame_count if isinstance(sink, MjpegFrameSink) else 0,
+                "jpeg_frames": sink.frame_count if isinstance(sink, MjpegFrameSink) else 0,
+                "packet_callback_warmed": isinstance(sink, MjpegFrameSink) and sink.frame_count > 0,
+            }, ensure_ascii=False, sort_keys=True),
+            flush=True,
+        )
 
     async def prepare(self, avatar_id: str, source: Path) -> None:
         async with self.lock:
             await asyncio.to_thread(self._register_avatar, avatar_id, source)
-            await asyncio.to_thread(self._warm_avatar, avatar_id)
+            await asyncio.to_thread(self._warm_avatar, avatar_id, asyncio.get_running_loop())
+            if self.config.warm_media_path:
+                # Deliver the callback scheduled by MjpegFrameSink before a
+                # turn may reuse this prepared avatar.
+                await asyncio.sleep(0)
 
     async def synthesize(self, text: str, output: Path) -> Path:
         process = await asyncio.create_subprocess_exec(
@@ -662,6 +716,45 @@ class RealtimePcmTimeline:
         return packets
 
 
+@dataclass
+class RealtimeTurnMetrics:
+    """Monotonic, worker-side timings for one Ditto Realtime turn."""
+
+    started_at: float = field(default_factory=time.monotonic)
+    marks: dict[str, float] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def mark(self, name: str, at: float | None = None) -> None:
+        with self.lock:
+            self.marks.setdefault(name, at if at is not None else time.monotonic())
+
+    def as_milliseconds(self, **extra: int | float | None) -> dict[str, int | float | None]:
+        with self.lock:
+            values: dict[str, int | float | None] = {
+                name: round((timestamp - self.started_at) * 1000, 1)
+                for name, timestamp in self.marks.items()
+            }
+        return {**values, **extra}
+
+
+class ObservedCallable:
+    """Add a best-effort wall-clock probe around a vendor pipeline callable."""
+
+    def __init__(self, target, stage: str, observer):
+        self._target = target
+        self._stage = stage
+        self._observer = observer
+
+    def __call__(self, *args, **kwargs):
+        started_at = time.monotonic()
+        result = self._target(*args, **kwargs)
+        self._observer(self._stage, started_at, time.monotonic())
+        return result
+
+    def __getattr__(self, name: str):
+        return getattr(self._target, name)
+
+
 class DittoRealtimeRuntime(DittoLiveRuntime):
     """Ditto online mode fed by incremental TTS PCM instead of a complete WAV.
 
@@ -677,6 +770,60 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         super().__init__(config)
         self._session_turns: dict[str, str] = {}
         self._timelines: dict[str, RealtimePcmTimeline] = {}
+        self._profile_lock = threading.Lock()
+        self._profile_first_turn_pending = config.profile_first_turn
+
+    def _take_profile_slot(self) -> bool:
+        """Enable detailed stage timing for exactly one explicitly opted-in turn."""
+        with self._profile_lock:
+            if not self._profile_first_turn_pending:
+                return False
+            self._profile_first_turn_pending = False
+            return True
+
+    def _sampling_timesteps_for(self, render_profile: str) -> int:
+        return self.config.fast_sampling_timesteps if render_profile == "fast" else self.config.sampling_timesteps
+
+    @staticmethod
+    def _preroll_frames_for(render_profile: str) -> int:
+        # These variants only alter which initial causal-context frames are
+        # presented; they do not claim to reduce upstream model computation.
+        # They are benchmark-only until first-phoneme quality and sync pass.
+        return {"fast_preroll9": 9, "fast_preroll5": 5}.get(render_profile, DITTO_PREROLL_FRAMES)
+
+    def _write_pipeline_profile(
+        self,
+        turn_id: str,
+        started_at: float,
+        events: list[tuple[str, float, float]],
+        first_frame_at: float | None,
+    ) -> None:
+        """Persist a compact, semantic timing trace without retaining media."""
+        by_stage: dict[str, list[tuple[float, float]]] = {}
+        for stage, began, ended in events:
+            by_stage.setdefault(stage, []).append((began, ended))
+        stages = {
+            stage: {
+                "calls": len(values),
+                "first_started_ms": round((values[0][0] - started_at) * 1000, 1),
+                "first_finished_ms": round((values[0][1] - started_at) * 1000, 1),
+                "first_duration_ms": round((values[0][1] - values[0][0]) * 1000, 1),
+                "total_duration_ms": round(sum(ended - began for began, ended in values) * 1000, 1),
+            }
+            for stage, values in by_stage.items()
+        }
+        payload = {
+            "turn_id": turn_id,
+            "sampling_timesteps": self.config.sampling_timesteps,
+            "first_frame_ms": None if first_frame_at is None else round((first_frame_at - started_at) * 1000, 1),
+            "stages": stages,
+            "note": "Thread wall-times overlap by design; use first_finished_ms to locate the first-frame critical path.",
+        }
+        output_dir = self.config.data_root / "benchmarks" / "profiles"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / f"{turn_id}-pipeline.json"
+        output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("Ditto realtime pipeline profile: " + json.dumps({**payload, "path": str(output)}, ensure_ascii=False, sort_keys=True), flush=True)
 
     @staticmethod
     def _speech_segments(text: str) -> list[str]:
@@ -724,7 +871,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             video_pts=asyncio.Queue(maxsize=1024),
         )
         timeline = RealtimePcmTimeline()
-        task = asyncio.create_task(self._run_realtime(body, turn, timeline, audio_dir), name=f"ditto-realtime-{body.turn_id}")
+        metrics = RealtimeTurnMetrics()
+        task = asyncio.create_task(self._run_realtime(body, turn, timeline, metrics, audio_dir), name=f"ditto-realtime-{body.turn_id}")
         turn.task = task
         self.turns[body.turn_id] = turn
         self._timelines[body.turn_id] = timeline
@@ -733,12 +881,20 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         task.add_done_callback(self._report_task_error)
         return f"/avatar-stream/v1/live/{body.turn_id}", None
 
-    async def _run_realtime(self, body: RenderIn, turn: LiveTurn, timeline: RealtimePcmTimeline, audio_dir: Path) -> None:
+    async def _run_realtime(
+        self,
+        body: RenderIn,
+        turn: LiveTurn,
+        timeline: RealtimePcmTimeline,
+        metrics: RealtimeTurnMetrics,
+        audio_dir: Path,
+    ) -> None:
         assert turn.websocket_connected is not None and turn.packets is not None
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(turn.websocket_connected.wait(), timeout=2.0)
         if not turn.websocket_connected.is_set():
             return
+        metrics.mark("socket_connected")
 
         pcm_input: queue.Queue[np.ndarray | None] = queue.Queue()
         render_task: asyncio.Task[None] | None = None
@@ -752,15 +908,20 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             # long voice could outlast the generated motion.  Run the tiny
             # local TTS fragments concurrently, concatenate in text order,
             # then make PCM duration the sole source of truth for both tracks.
-            pcm_parts = await asyncio.gather(*(
-                self._synthesize_pcm(segment, audio_dir / f"{body.turn_id}-{index}.wav")
+            metrics.mark("tts_started")
+            synthesis_tasks = [
+                asyncio.create_task(self._synthesize_pcm(segment, audio_dir / f"{body.turn_id}-{index}.wav"))
                 for index, segment in enumerate(segments)
-            ))
+            ]
+            await asyncio.wait(synthesis_tasks, return_when=asyncio.FIRST_COMPLETED)
+            metrics.mark("tts_first_pcm_ready")
+            pcm_parts = await asyncio.gather(*synthesis_tasks)
+            metrics.mark("tts_all_pcm_ready")
             pcm = np.concatenate(pcm_parts) if len(pcm_parts) > 1 else pcm_parts[0]
             timeline.append(pcm)
             timeline.finish()
             render_task = asyncio.create_task(
-                asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, pcm_input),
+                asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, metrics, pcm_input),
                 name=f"ditto-realtime-sdk-{body.turn_id}",
             )
             pcm_input.put(pcm)
@@ -796,10 +957,24 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         body: RenderIn,
         turn: LiveTurn,
         timeline: RealtimePcmTimeline,
+        metrics: RealtimeTurnMetrics,
         pcm_input: queue.Queue[np.ndarray | None],
     ) -> None:
         assert turn.packets is not None and turn.playback_started is not None
+        metrics.mark("renderer_thread_started")
         sdk = self._load_sdk()
+        base_profile = "fast" if body.render_profile.startswith("fast") else "quality"
+        sampling_timesteps = self._sampling_timesteps_for(base_profile)
+        preroll_frames = self._preroll_frames_for(body.render_profile)
+        profile_enabled = self._take_profile_slot()
+        profile_started_at = time.monotonic()
+        profile_events: list[tuple[str, float, float]] = []
+        profile_events_lock = threading.Lock()
+
+        def observe_stage(stage: str, began: float, ended: float) -> None:
+            if profile_enabled:
+                with profile_events_lock:
+                    profile_events.append((stage, began, ended))
 
         def publish(kind: str, pts_ms: int, payload: bytes) -> None:
             if kind != "video" or not timeline.accepts_video(pts_ms):
@@ -814,22 +989,40 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         # same endpoint as audio and clips its causal tail to that endpoint.
         target_frames = timeline.frame_count()
         motion_plan = body.motion_plan or MotionPlan()
-        ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=DITTO_PREROLL_FRAMES)
+        ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames)
         sink = MjpegFrameSink(
             loop,
             turn.frames,
             expected_frames=target_frames,
             packet_sink=publish,
             playback_started=turn.playback_started,
-            skip_initial_frames=DITTO_PREROLL_FRAMES,
+            skip_initial_frames=preroll_frames,
             pace_output=False,
         )
+        setup_started_at = time.monotonic()
         sdk.setup(
             "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
-            sampling_timesteps=self.config.sampling_timesteps,
+            sampling_timesteps=sampling_timesteps,
             emo=DITTO_EMOTION_INDEX[motion_plan.expression], ctrl_info=ctrl_info,
         )
+        if profile_enabled:
+            profile_events.append(("turn_setup", setup_started_at, time.monotonic()))
+        setup_nd_started_at = time.monotonic()
         sdk.setup_Nd(target_frames, ctrl_info=ctrl_info)
+        if profile_enabled:
+            profile_events.append(("setup_Nd", setup_nd_started_at, time.monotonic()))
+            # The upstream SDK owns its six worker-loop functions, so wrap its
+            # public components after setup rather than maintaining a fork of
+            # the ignored, read-only vendor checkout. Attribute forwarding
+            # preserves config and helper access used by those worker loops.
+            sdk.wav2feat = ObservedCallable(sdk.wav2feat, "hubert_wav2feat", observe_stage)
+            sdk.audio2motion = ObservedCallable(sdk.audio2motion, "audio2motion_diffusion", observe_stage)
+            sdk.motion_stitch = ObservedCallable(sdk.motion_stitch, "motion_stitch", observe_stage)
+            sdk.warp_f3d = ObservedCallable(sdk.warp_f3d, "warp_f3d", observe_stage)
+            sdk.decode_f3d = ObservedCallable(sdk.decode_f3d, "decode_f3d", observe_stage)
+            sdk.putback = ObservedCallable(sdk.putback, "putback", observe_stage)
+            sdk.writer = ObservedCallable(sdk.writer, "jpeg_and_packet", observe_stage)
+        metrics.mark("ditto_setup_done")
         # Ditto consumes a 6,480-sample causal window and advances 3,200
         # samples. Keep exactly that rolling overlap across TTS fragments.
         window_samples = int(sum(DITTO_CHUNKSIZE) * .04 * 16_000) + 80
@@ -858,12 +1051,22 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         finally:
             sdk.close()
             sink.close()
-            first = None if sink.first_frame_at is None else round(sink.first_frame_at - sink.started_at, 3)
+            if sink.first_frame_at is not None:
+                metrics.mark("first_frame_ready", sink.first_frame_at)
+            if profile_enabled:
+                self._write_pipeline_profile(body.turn_id, profile_started_at, profile_events, sink.first_frame_at)
             print(
-                "Ditto realtime metrics: "
-                f"turn={body.turn_id} first_frame_s={first} "
-                f"target_frames={target_frames} emitted_frames={sink.frame_count} "
-                f"dropped_tail={sink.dropped_tail_frames}",
+                "Ditto realtime metrics: " + json.dumps({
+                    "turn_id": body.turn_id,
+                    "render_profile": body.render_profile,
+                    "sampling_timesteps": sampling_timesteps,
+                    "preroll_skip_frames": preroll_frames,
+                    **metrics.as_milliseconds(
+                        target_frames=target_frames,
+                        emitted_frames=sink.frame_count,
+                        dropped_tail=sink.dropped_tail_frames,
+                    ),
+                }, ensure_ascii=False, sort_keys=True),
                 flush=True,
             )
 

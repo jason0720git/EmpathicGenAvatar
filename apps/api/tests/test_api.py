@@ -135,3 +135,23 @@ def test_realtime_session_requires_deployed_realtime_renderer(tmp_path):
         response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"], "renderer_method": "ditto_realtime"})
         assert response.status_code == 409
         assert "Ditto Realtime" in response.json()["detail"]
+
+
+def test_realtime_fast_lane_requires_deployed_realtime_renderer(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"], "renderer_method": "ditto_realtime_fast"})
+        assert response.status_code == 409
+        assert "Ditto Realtime" in response.json()["detail"]
+
+
+def test_timing_telemetry_persists_no_conversation_content(tmp_path):
+    with client_for(tmp_path) as client:
+        response = client.post(
+            "/api/telemetry/turn",
+            json={"turn_id": "turn-123", "event": "playback_started", "elapsed_ms": 1234, "details": {"buffer_target_ms": 250}},
+        )
+        assert response.status_code == 204
+        saved = (tmp_path / "data" / "telemetry" / "turn-events.jsonl").read_text(encoding="utf-8")
+        assert "turn-123" in saved
+        assert "conversation" not in saved

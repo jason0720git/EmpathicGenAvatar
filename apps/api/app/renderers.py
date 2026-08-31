@@ -50,10 +50,12 @@ class RemoteRenderer(AvatarRenderer):
 
     mode = "remote"
 
-    def __init__(self, base_url: str, shared_token: str | None = None, stream_prefix: str = "/avatar-stream/"):
+    def __init__(self, base_url: str, shared_token: str | None = None, stream_prefix: str = "/avatar-stream/", render_profile: str | None = None):
         self.base_url = base_url.rstrip("/")
+        self.shared_token = shared_token
         self.headers = {"X-Worker-Token": shared_token} if shared_token else {}
         self.stream_prefix = stream_prefix.rstrip("/") + "/"
+        self.render_profile = render_profile
 
     async def prepare(self, avatar: AvatarOut, source_path: Path) -> Preparation:
         payload: dict[str, Any] = {
@@ -70,6 +72,8 @@ class RemoteRenderer(AvatarRenderer):
 
     async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         payload: dict[str, Any] = {"avatar_id": avatar.id, "session_id": session_id, "turn_id": turn_id, "text": text}
+        if self.render_profile is not None:
+            payload["render_profile"] = self.render_profile
         if motion_plan is not None:
             payload["motion_plan"] = motion_plan.model_dump(mode="json")
         # First Ditto invocation initializes several TensorRT engines and can

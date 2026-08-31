@@ -25,7 +25,7 @@ class AvatarOut(BaseModel):
     quality: ImageQuality | None = None
 
 
-RendererMethod = Literal["ditto", "ditto_realtime", "fast"]
+RendererMethod = Literal["ditto", "ditto_realtime", "ditto_realtime_fast", "fast"]
 
 
 class CreateSessionIn(BaseModel):
@@ -43,7 +43,21 @@ class SessionOut(BaseModel):
 
 class TurnIn(BaseModel):
     text: str = Field(min_length=1, max_length=4_000)
+    client_turn_id: str | None = Field(default=None, min_length=1, max_length=128)
     motion_plan: "MotionPlan | None" = None
+
+
+class TurnTelemetryIn(BaseModel):
+    """Timing-only browser telemetry. Conversation text and media stay out."""
+
+    turn_id: str = Field(min_length=1, max_length=128)
+    event: Literal[
+        "turn_submitted", "turn_response", "socket_open", "first_packet",
+        "first_video_decoded", "playback_started", "playback_ended",
+        "jpeg_decode_failed", "video_pts_gap",
+    ]
+    elapsed_ms: int = Field(ge=0, le=300_000)
+    details: dict[str, int | float | str | bool] = Field(default_factory=dict)
 
 
 class HeadPose(BaseModel):

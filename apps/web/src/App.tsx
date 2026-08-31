@@ -37,7 +37,9 @@ import { localTurn } from './localTurn'
 import type { Avatar, LiveState, MotionPlan, TranscriptItem, TurnResponse } from './types'
 
 type Page = 'dashboard' | 'avatars' | 'create' | 'method' | 'live'
-type ConversationMethod = 'ditto' | 'ditto_realtime'
+type ConversationMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast'
+
+const PLAYOUT_BUFFER_KEY = 'empathic-avatar.playout-buffer-ms'
 
 interface SpeechRecognitionResultEventLike extends Event {
   results: {
@@ -315,8 +317,13 @@ function MethodPicker({ avatar, selected, onSelect, onBack, onStart }: {
           <span><strong>Ditto Realtime</strong><small>스트리밍 TTS PCM과 Ditto 온라인 렌더 · 첫 발화 지연을 줄이는 실험 경로</small></span>
           <em>실험</em>
         </button>
+        <button className={`method-option ${selected === 'ditto_realtime_fast' ? 'selected' : ''}`} onClick={() => onSelect('ditto_realtime_fast')}>
+          <span className="method-radio" aria-hidden="true" />
+          <span><strong>Ditto Realtime · Fast Lane</strong><small>2-step 확산 실험 · 더 빠른 첫 반응을 우선하며 품질은 4-step 기준선과 비교</small></span>
+          <em>2-step</em>
+        </button>
       </div>
-      <div className="method-actions"><button className="secondary-button" onClick={onBack}>뒤로</button><button className="primary-button" onClick={onStart}><Radio size={17} /> {selected === 'ditto_realtime' ? 'Ditto Realtime으로 대화 시작' : 'Ditto Default로 대화 시작'} <ArrowRight size={16} /></button></div>
+      <div className="method-actions"><button className="secondary-button" onClick={onBack}>뒤로</button><button className="primary-button" onClick={onStart}><Radio size={17} /> {selected === 'ditto_realtime_fast' ? 'Fast Lane으로 대화 시작' : selected === 'ditto_realtime' ? 'Ditto Realtime으로 대화 시작' : 'Ditto Default로 대화 시작'} <ArrowRight size={16} /></button></div>
       <small className="method-note">Realtime은 Default와 별도 GPU 워커·별도 실시간 스트림을 사용합니다. 문제가 생겨도 안정화 기준 경로에는 영향을 주지 않습니다.</small>
     </section>
   )
@@ -504,7 +511,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
     setRealtimeActive(false)
   }
 
-  const startRealtime = (streamPath: string) => {
+  const startRealtime = (streamPath: string, turnId: string, turnStartedAt: number) => {
     stopRealtime()
     const context = new AudioContext()
     realtimeAudioRef.current = context
@@ -520,8 +527,21 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
     // Ditto's online renderer can have a short GPU/encoder burst after it has
     // started speaking. Keeping 0.6 s ahead lets the browser absorb that
     // jitter without slowing both audio and video together mid-utterance.
-    const initialBufferMs = 600
+    // Start conservatively on a fresh browser, then retain a small target for
+    // a stable local path. Any JPEG failure or PTS gap makes the next turn
+    // recover toward 600 ms rather than silently trading sync for speed.
+    const storedBuffer = Number(window.sessionStorage.getItem(PLAYOUT_BUFFER_KEY))
+    const initialBufferMs = Number.isFinite(storedBuffer) && storedBuffer >= 200 && storedBuffer <= 600 ? storedBuffer : 350
     let ended = false
+    let firstPacketLogged = false
+    let firstVideoDecodedLogged = false
+    let lastVideoPacketPts = -1
+    let jpegDecodeFailures = 0
+    let videoPtsGaps = 0
+    const elapsed = () => Math.max(0, Math.round(performance.now() - turnStartedAt))
+    const telemetry = (event: string, details: Record<string, number | string | boolean> = {}) => {
+      if (apiOnline) void api.telemetry({ turn_id: turnId, event, elapsed_ms: elapsed(), details })
+    }
     const drawAt = (ptsMs: number, bitmap: ImageBitmap) => {
       if (mediaStart === null) {
         pendingFrames.push([ptsMs, bitmap])
@@ -553,10 +573,16 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
         // deadline was the source of the slow-looking first seconds.
         const bitmap = await createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' }))
         latestDecodedVideoPts = Math.max(latestDecodedVideoPts, ptsMs)
+        if (!firstVideoDecodedLogged) {
+          firstVideoDecodedLogged = true
+          telemetry('first_video_decoded', { pts_ms: ptsMs })
+        }
         drawAt(ptsMs, bitmap)
         startWhenBuffered()
       } catch {
         // A dropped JPEG is preferable to delaying the shared media clock.
+        jpegDecodeFailures += 1
+        telemetry('jpeg_decode_failed', { pts_ms: ptsMs, failures: jpegDecodeFailures })
       }
     }
     const scheduleAudio = (ptsMs: number, payload: ArrayBuffer) => {
@@ -578,6 +604,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
       // not cumulative delay, and gives ImageBitmap decoding a stable lead.
       mediaStart = context.currentTime + 0.2
       finalAudioAt = mediaStart
+      telemetry('playback_started', { buffer_target_ms: initialBufferMs, buffered_video_pts_ms: latestDecodedVideoPts })
       for (const [pendingPts, pendingPcm] of pendingAudio.splice(0)) scheduleAudio(pendingPts, pendingPcm)
       for (const [pendingPts, pendingBitmap] of pendingFrames.splice(0)) drawAt(pendingPts, pendingBitmap)
     }
@@ -589,6 +616,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
       setRealtimeActive(true)
       setAudioLevel(0.5)
       void context.resume()
+      telemetry('socket_open')
     }
     socket.onmessage = (event) => {
       const packet = event.data as ArrayBuffer
@@ -597,6 +625,10 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
       const kind = view.getUint8(0)
       const ptsMs = view.getUint32(1, false)
       const payload = packet.slice(5)
+      if (!firstPacketLogged) {
+        firstPacketLogged = true
+        telemetry('first_packet', { kind, pts_ms: ptsMs })
+      }
       if (kind === 1) {
         if (mediaStart === null) {
           pendingAudio.push([ptsMs, payload])
@@ -605,12 +637,22 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
         }
         scheduleAudio(ptsMs, payload)
       } else if (kind === 2) {
+        if (lastVideoPacketPts >= 0 && ptsMs - lastVideoPacketPts > 80) {
+          videoPtsGaps += 1
+          telemetry('video_pts_gap', { previous_pts_ms: lastVideoPacketPts, pts_ms: ptsMs, gaps: videoPtsGaps })
+        }
+        lastVideoPacketPts = ptsMs
         void decodeAndDraw(ptsMs, payload)
       } else if (kind === 3) {
         ended = true
         const finishIn = Math.max(0, finalAudioAt - context.currentTime) * 1000 + 80
         window.setTimeout(() => {
           if (ended) {
+            const nextBuffer = jpegDecodeFailures || videoPtsGaps
+              ? Math.min(600, initialBufferMs + 100)
+              : Math.max(200, initialBufferMs - 50)
+            window.sessionStorage.setItem(PLAYOUT_BUFFER_KEY, String(nextBuffer))
+            telemetry('playback_ended', { jpeg_decode_failures: jpegDecodeFailures, video_pts_gaps: videoPtsGaps, next_buffer_ms: nextBuffer })
             stopRealtime()
             setAudioLevel(0.13)
             setState('ready')
@@ -639,6 +681,8 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
     setInterim('')
     setDraft('')
     const turnId = `user-${Date.now()}`
+    const turnStartedAt = performance.now()
+    if (apiOnline) void api.telemetry({ turn_id: turnId, event: 'turn_submitted', elapsed_ms: 0 })
     setCaptions((items) => [...items, { id: turnId, role: 'user', text, at: new Date() }])
     setState('thinking')
     const motionPlan: MotionPlan = {
@@ -649,8 +693,9 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
       gaze: { x: 0, y: 0 },
     }
     try {
-      const result = apiOnline ? await api.sendTurn(sessionId, text, motionPlan) : localTurn(text, avatar)
+      const result = apiOnline ? await api.sendTurn(sessionId, text, motionPlan, turnId) : localTurn(text, avatar)
       if (!mountedRef.current) return
+      if (apiOnline) void api.telemetry({ turn_id: result.turn_id, event: 'turn_response', elapsed_ms: Math.round(performance.now() - turnStartedAt) })
       setCaptions((items) => [...items, { id: result.turn_id, role: 'assistant', text: result.assistant_text, at: new Date() }])
       setState('speaking')
       const video = mediaUrl(result.renderer.stream_url)
@@ -658,7 +703,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
         setRenderedVideo(undefined)
         setRenderedAudio(undefined)
         setStreamReady(false)
-        startRealtime(result.renderer.stream_url)
+        startRealtime(result.renderer.stream_url, result.turn_id, turnStartedAt)
       } else if (video) {
         setRenderedVideo(video)
         setRenderedAudio(mediaUrl(result.renderer.audio_url))
@@ -755,7 +800,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
   return (
     <div className="live-layout">
       <section className="live-stage">
-        <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">{method === 'ditto' ? 'Ditto Default · stable lip sync' : 'Ditto Realtime · streaming TTS + online Ditto'}</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
+          <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">{method === 'ditto' ? 'Ditto Default · stable lip sync' : method === 'ditto_realtime_fast' ? 'Ditto Realtime Fast Lane · 2-step experiment' : 'Ditto Realtime · streaming TTS + online Ditto'}</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
@@ -766,7 +811,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
             <span><Camera size={11} /> 로컬 미리보기</span>
           </div>
           <div className="ai-watermark"><Sparkles size={13} /> AI AVATAR</div>
-          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
+          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime_fast' ? 'Ditto Fast Lane · GPU' : method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
         </div>
         <div className="stage-controls"><button className="round-control" aria-label={muted ? '마이크 켜기' : '마이크 끄기'} onClick={() => { setMuted((value) => !value); if (!muted) stopListening() }}>{muted ? <MicOff size={19} /> : <Mic size={19} />}</button><button className={`talk-button ${state === 'listening' ? 'active' : ''}`} disabled={state === 'connecting' || state === 'thinking'} onClick={() => { if (state === 'listening') stopListening(); else void startListening() }}>{state === 'listening' ? <><Pause size={17} /> 듣기 중지</> : isSpeaking ? <><Mic size={17} /> 끼어들어 말하기</> : <><Mic size={17} /> 길게 눌러 말하기</>}</button><button className={`round-control ${cameraEnabled ? 'active-camera' : ''}`} aria-label={cameraEnabled ? '카메라 끄기' : '카메라 켜기'} onClick={() => void toggleCamera()}>{cameraEnabled ? <Camera size={19} /> : <CameraOff size={19} />}</button><button className="round-control" aria-label="대화 종료" onClick={onExit}><X size={20} /></button></div>
         {interim && <div className="interim-caption"><AudioLines size={16} /><span>{interim}</span></div>}

@@ -73,6 +73,15 @@ services:
       DITTO_MODEL_ROOT: /models/ditto/ditto_pytorch
       DITTO_CONFIG: /models/ditto/ditto_cfg/v0.4_hubert_cfg_pytorch.pkl
       DITTO_SAMPLING_TIMESTEPS: ${DITTO_REALTIME_SAMPLING_TIMESTEPS:-4}
+      # Fast Lane is an explicit session choice; it never changes the 4-step
+      # Realtime quality baseline above.
+      DITTO_FAST_SAMPLING_TIMESTEPS: ${DITTO_FAST_SAMPLING_TIMESTEPS:-2}
+      # Extended JPEG/callback warm-up is measurable but currently does not
+      # improve first spoken-frame latency enough to be the default.
+      DITTO_WARM_MEDIA_PATH: ${DITTO_WARM_MEDIA_PATH:-false}
+      # Set true only for one controlled turn to emit a semantic, media-free
+      # first-frame stage profile under /data/benchmarks/profiles.
+      DITTO_PROFILE_FIRST_TURN: ${DITTO_PROFILE_FIRST_TURN:-false}
       WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
     volumes:
       - avatar-data:/data

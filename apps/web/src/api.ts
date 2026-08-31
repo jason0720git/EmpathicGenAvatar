@@ -55,13 +55,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod }),
     }),
-  sendTurn: (sessionId: string, text: string, motionPlan?: MotionPlan) =>
+  sendTurn: (sessionId: string, text: string, motionPlan?: MotionPlan, clientTurnId?: string) =>
     request<TurnResponse>(`/api/live/sessions/${sessionId}/turns`, {
       method: 'POST',
-      body: JSON.stringify({ text, motion_plan: motionPlan }),
+      body: JSON.stringify({ text, motion_plan: motionPlan, client_turn_id: clientTurnId }),
     }),
   interrupt: (sessionId: string) =>
     request<{ state: string }>(`/api/live/sessions/${sessionId}/interrupt`, { method: 'POST' }),
   endSession: (sessionId: string) =>
     request<void>(`/api/live/sessions/${sessionId}`, { method: 'DELETE' }),
+  telemetry: (payload: { turn_id: string; event: string; elapsed_ms: number; details?: Record<string, number | string | boolean> }) =>
+    request<void>('/api/telemetry/turn', { method: 'POST', body: JSON.stringify(payload) }).catch(() => undefined),
 }
