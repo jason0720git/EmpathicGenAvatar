@@ -16,6 +16,7 @@ reported as failed rather than silently falling back to an unrelated engine.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import platform
@@ -29,6 +30,7 @@ from typing import Iterable
 
 DEFAULT_ONNX_ROOT = Path("/models/ditto/ditto_onnx")
 DEFAULT_OUTPUT_ROOT = Path("/data/engines/ditto-trt10")
+DEFAULT_PLUGIN_PATH = Path("/worker/trt_plugins/libditto_gridsample3d_trt10.so")
 # These names exactly match v0.4_hubert_cfg_trt_online.pkl.  The model is
 # called in a Python diffusion loop, so engineizing it removes per-step PyTorch
 # dispatch but does not remove the configured number of diffusion steps.
@@ -50,7 +52,7 @@ ENGINE_NAMES = {
     # substituted into the renderer until numerical/video parity passes.
     "warp_network_ori": ("warp_network_ori_fp16.engine", True),
 }
-SUPPORTED_MODELS = tuple(name for name in ENGINE_NAMES if not name.startswith("warp_network"))
+SUPPORTED_MODELS = tuple(name for name in ENGINE_NAMES if name != "warp_network_ori")
 
 # Fixed profiles actually used by the online Ditto pipeline.  The upstream
 # models mark some batch/time axes dynamic even though StreamSDK supplies one
@@ -83,6 +85,20 @@ def _trt():
     return trt
 
 
+def _load_ditto_plugin(model: str) -> None:
+    """Register the legacy ONNX parser plugin before parsing/deserialize.
+
+    TensorRT 10's ``dynamicPlugins`` CLI option is for V3 libraries exposing
+    ``getCreators``. Ditto's ONNX parser uses the compatible V2 creator path,
+    so loading the .so into the process is intentional here.
+    """
+    if model != "warp_network":
+        return
+    if not DEFAULT_PLUGIN_PATH.is_file():
+        raise FileNotFoundError(f"GridSample3D TensorRT 10 plugin missing: {DEFAULT_PLUGIN_PATH}")
+    ctypes.CDLL(str(DEFAULT_PLUGIN_PATH), mode=ctypes.RTLD_GLOBAL)
+
+
 def _shape(dims) -> list[int]:
     return [int(dim) for dim in dims]
 
@@ -111,6 +127,7 @@ def _dynamic_shape(model: str, name: str, shape: list[int]) -> tuple[int, ...]:
 
 def audit_one(model: str, onnx_path: Path) -> Result:
     trt = _trt()
+    _load_ditto_plugin(model)
     started = time.perf_counter()
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
@@ -147,6 +164,7 @@ def build_one(model: str, onnx_path: Path, output_root: Path) -> Result:
     if result.status != "parse_ok":
         return result
     trt = _trt()
+    _load_ditto_plugin(model)
     started = time.perf_counter()
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
@@ -197,12 +215,15 @@ def verify_one(model: str, onnx_path: Path, output_root: Path) -> Result:
         result.error = result.error or f"engine not found: {target}"
         return result
     started = time.perf_counter()
+    _load_ditto_plugin(model)
     # trtexec exercises bindings and execution, whereas deserialization alone
     # can miss a profile/binding incompatibility.  No media is supplied here.
     command = [
         "/opt/tensorrt/bin/trtexec", f"--loadEngine={target}",
         "--warmUp=200", "--duration=1", "--useSpinWait", "--noDataTransfers",
     ]
+    if model == "warp_network":
+        command.append(f"--plugins={DEFAULT_PLUGIN_PATH}")
     run = subprocess.run(command, capture_output=True, text=True, timeout=120)
     text = (run.stdout + "\n" + run.stderr)[-6_000:]
     result.elapsed_ms = round((time.perf_counter() - started) * 1000, 2)

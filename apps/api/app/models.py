@@ -25,7 +25,7 @@ class AvatarOut(BaseModel):
     quality: ImageQuality | None = None
 
 
-RendererMethod = Literal["ditto", "ditto_realtime", "ditto_realtime_fast", "fast"]
+RendererMethod = Literal["ditto", "ditto_realtime", "ditto_realtime_fast", "ditto_realtime_trt10", "fast"]
 
 
 class CreateSessionIn(BaseModel):

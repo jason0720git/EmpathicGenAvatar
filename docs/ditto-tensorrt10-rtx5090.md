@@ -28,9 +28,23 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml exec -T \
 GPU명·드라이버·TensorRT 버전·입출력 shape·엔진 크기·실패 사유를 남긴다. 이 파일은
 원본 음성/이미지/대화 텍스트를 저장하지 않는다.
 
-`audit --all`은 알려진 warp blocker까지 포함해 release gate를 확인한다. 반대로
-`--supported`는 현재 TensorRT 10에서 build/execute 가능한 모든 모델만 선택하므로,
-자동화의 성공 여부를 명확하게 판정할 때 사용한다.
+`audit --all`은 대체용 `warp_network_ori`까지 포함해 호환성 상태를 확인한다. 반대로
+`--supported`는 현재 TensorRT 10에서 build/execute 가능한 모든 production 모델(새
+`warp_network` plugin 포함)만 선택하므로, 자동화의 성공 여부를 명확하게 판정할 때 사용한다.
+
+`warp_network`까지 다시 생성한 뒤에는 다음 두 gate를 실행한다.
+
+```bash
+# Plugin을 포함한 engine deserialize/execute
+/opt/tensorrt/bin/trtexec --loadEngine=/data/engines/ditto-trt10/warp_network_fp16.engine \
+  --plugins=/worker/trt_plugins/libditto_gridsample3d_trt10.so --warmUp=200 --duration=1
+
+# 동일 텐서 기준 PyTorch vs TensorRT warp numerical parity
+python -m app.trt10_warp_parity
+
+# 실제 StreamSDK online pipeline smoke test (사용자 미디어를 저장하지 않음)
+python -m app.trt10_stream_smoke
+```
 
 ## 2026-08-28 RTX 5090 감사 결과
 
@@ -41,24 +55,38 @@ block 하나를 TensorRT로 실행할 수 있지만, diffusion step loop 자체�
 orchestration에 남는다.
 
 `warp_network.onnx`는 `GridSample3D` TensorRT-8 custom plugin을 요구한다. 제공된
-`libgrid_sample_3d_plugin.so`는 TensorRT 8 ABI용이며 TensorRT 10에 로드하지 않는다.
-`warp_network_ori.onnx`도 5D grid sample을 사용하므로 TensorRT 10 native GridSample의
-4D 제약으로 대체되지 않는다. 따라서 현재 상태에서는 **최종 합성 엔진이 없으므로
-TensorRT 전체 renderer를 활성화하지 않는다**. 생성된 부분 엔진을 현재 PyTorch
-서비스에 섞어 쓰지 않는 이유도 프레임 parity를 보장하기 위해서다.
+`libgrid_sample_3d_plugin.so`는 TensorRT 8 ABI용이며 TensorRT 10에 로드할 수 없다.
+이 프로젝트는 그 연산의 TensorRT 10 V2DynamicExt 구현을
+`workers/avatar/trt_plugins/libditto_gridsample3d_trt10.so`로 새로 빌드한다.
+TensorRT 10 CLI에서는 이 legacy ONNX-parser plugin을 `--plugins`로 로드해야 하며,
+`--dynamicPlugins`(V3 `getCreators` ABI)는 사용하지 않는다.
+
+RTX 5090에서 새 plugin을 포함한 `warp_network_fp16.engine` 생성·역직렬화·실행까지
+통과했다. PyTorch warp와 동일 seed 입력의 component parity는 max abs `0.00791`, mean
+abs `0.000355`로 gate(max `0.03`, mean `0.003`)를 통과했다. `warp_network_ori.onnx`는
+5D grid sample을 사용하므로 TensorRT 10 native GridSample의 4D 제약으로 대체되지 않는다.
+
+동일한 2-step / 40 ms online smoke 조건에서 TensorRT StreamSDK는 40 frame을 만들고
+첫 frame을 `302ms`에 냈다. 이 값은 TTS·HTTP·WebSocket·browser playout과 별개인
+GPU pipeline measurement이며, 사용자 체감 first packet은 별도 end-to-end telemetry로
+계속 비교한다.
 
 ## 다음 release gate
 
-1. TensorRT 10 API로 GridSample3D plugin을 포팅하고, ONNX node 이름/version/namespace를
-   일치시킨다.
-2. 해당 plugin을 RTX 5090/TensorRT 10.8에서 컴파일하고 `warp_network` parser/build를
-   통과시킨다.
-3. PyTorch와 TRT로 동일 source+WAV를 25 fps로 렌더링해 frame-wise pixel/landmark 및
+1. PyTorch와 TRT로 동일 source+WAV를 25 fps로 렌더링해 frame-wise pixel/landmark 및
    lip timing을 비교한다. 허용 기준을 정하기 전에는 서비스 라우팅을 바꾸지 않는다.
-4. engine manifest의 GPU/driver/TRT version이 배포 노드와 일치할 때만 `DITTO_MODEL_ROOT`
+2. engine manifest의 GPU/driver/TRT version이 배포 노드와 일치할 때만 `DITTO_MODEL_ROOT`
    를 엔진 디렉터리로 전환한다. 불일치나 실행 실패 시에는 명시적으로 PyTorch로
    fallback하고 telemetry에 `runtime=pytorch_fallback`을 남긴다.
 
 이 gate를 통과하면 first-frame 병목 중 LMDM/decoder/feature 추론 시간을 줄일 여지가
 있다. 하지만 음성 context(13 preroll frames), 확산 step 수, JPEG/WebSocket 전송은
 별도 병목이므로 엔진화만으로 전체 2.5초를 0초로 만들지는 않는다.
+
+## 웹 대화에서의 A/B
+
+일반 GPU compose 기동 시 PyTorch Realtime과 TensorRT 10 worker가 모두 준비된다.
+웹의 시작 화면에서 **Ditto Realtime TensorRT 10**을 고르면 API가 전용 worker로
+자동 라우팅한다. 환경변수·Docker 명령을 바꿀 필요가 없다. 같은 아바타·대본으로
+PyTorch Realtime과 TensorRT 10을 각각 10회 테스트해 first packet, playback start,
+lip-sync, 얼굴 경계 artifact를 비교한다.

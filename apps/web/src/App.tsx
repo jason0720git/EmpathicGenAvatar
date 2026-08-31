@@ -37,7 +37,7 @@ import { localTurn } from './localTurn'
 import type { Avatar, LiveState, MotionPlan, TranscriptItem, TurnResponse } from './types'
 
 type Page = 'dashboard' | 'avatars' | 'create' | 'method' | 'live'
-type ConversationMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast'
+type ConversationMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'ditto_realtime_trt10'
 
 const PLAYOUT_BUFFER_KEY = 'empathic-avatar.playout-buffer-ms'
 
@@ -322,8 +322,13 @@ function MethodPicker({ avatar, selected, onSelect, onBack, onStart }: {
           <span><strong>Ditto Realtime · Fast Lane</strong><small>2-step 확산 실험 · 더 빠른 첫 반응을 우선하며 품질은 4-step 기준선과 비교</small></span>
           <em>2-step</em>
         </button>
+        <button className={`method-option ${selected === 'ditto_realtime_trt10' ? 'selected' : ''}`} onClick={() => onSelect('ditto_realtime_trt10')}>
+          <span className="method-radio" aria-hidden="true" />
+          <span><strong>Ditto Realtime · TensorRT 10</strong><small>RTX 5090 최적화 엔진 · 새 GridSample3D 합성 plugin · 저지연 실험 경로</small></span>
+          <em>RTX 5090</em>
+        </button>
       </div>
-      <div className="method-actions"><button className="secondary-button" onClick={onBack}>뒤로</button><button className="primary-button" onClick={onStart}><Radio size={17} /> {selected === 'ditto_realtime_fast' ? 'Fast Lane으로 대화 시작' : selected === 'ditto_realtime' ? 'Ditto Realtime으로 대화 시작' : 'Ditto Default로 대화 시작'} <ArrowRight size={16} /></button></div>
+      <div className="method-actions"><button className="secondary-button" onClick={onBack}>뒤로</button><button className="primary-button" onClick={onStart}><Radio size={17} /> {selected === 'ditto_realtime_trt10' ? 'TensorRT 10으로 대화 시작' : selected === 'ditto_realtime_fast' ? 'Fast Lane으로 대화 시작' : selected === 'ditto_realtime' ? 'Ditto Realtime으로 대화 시작' : 'Ditto Default로 대화 시작'} <ArrowRight size={16} /></button></div>
       <small className="method-note">Realtime은 Default와 별도 GPU 워커·별도 실시간 스트림을 사용합니다. 문제가 생겨도 안정화 기준 경로에는 영향을 주지 않습니다.</small>
     </section>
   )
@@ -699,7 +704,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
       setCaptions((items) => [...items, { id: result.turn_id, role: 'assistant', text: result.assistant_text, at: new Date() }])
       setState('speaking')
       const video = mediaUrl(result.renderer.stream_url)
-      if (result.renderer.stream_url?.startsWith('/avatar-stream/') || result.renderer.stream_url?.startsWith('/avatar-stream-realtime/')) {
+      if (result.renderer.stream_url?.startsWith('/avatar-stream/') || result.renderer.stream_url?.startsWith('/avatar-stream-realtime/') || result.renderer.stream_url?.startsWith('/avatar-stream-trt10/')) {
         setRenderedVideo(undefined)
         setRenderedAudio(undefined)
         setStreamReady(false)
@@ -800,7 +805,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
   return (
     <div className="live-layout">
       <section className="live-stage">
-          <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">{method === 'ditto' ? 'Ditto Default · stable lip sync' : method === 'ditto_realtime_fast' ? 'Ditto Realtime Fast Lane · 2-step experiment' : 'Ditto Realtime · streaming TTS + online Ditto'}</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
+          <div className="live-stage-top"><div><span className="eyebrow"><Radio size={14} /> LIVE · AI GENERATED</span><h2>{avatar.name}</h2><p className="render-pipeline">{method === 'ditto' ? 'Ditto Default · stable lip sync' : method === 'ditto_realtime_trt10' ? 'Ditto Realtime TensorRT 10 · RTX 5090 engine' : method === 'ditto_realtime_fast' ? 'Ditto Realtime Fast Lane · 2-step experiment' : 'Ditto Realtime · streaming TTS + online Ditto'}</p></div><div className={`connection-state ${state}`}><i />{stateLabel[state]}</div></div>
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
@@ -811,7 +816,7 @@ function LiveRoom({ avatar, method, apiOnline, onExit }: { avatar: Avatar; metho
             <span><Camera size={11} /> 로컬 미리보기</span>
           </div>
           <div className="ai-watermark"><Sparkles size={13} /> AI AVATAR</div>
-          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime_fast' ? 'Ditto Fast Lane · GPU' : method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
+          <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime_trt10' ? 'Ditto TRT 10 · GPU' : method === 'ditto_realtime_fast' ? 'Ditto Fast Lane · GPU' : method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
         </div>
         <div className="stage-controls"><button className="round-control" aria-label={muted ? '마이크 켜기' : '마이크 끄기'} onClick={() => { setMuted((value) => !value); if (!muted) stopListening() }}>{muted ? <MicOff size={19} /> : <Mic size={19} />}</button><button className={`talk-button ${state === 'listening' ? 'active' : ''}`} disabled={state === 'connecting' || state === 'thinking'} onClick={() => { if (state === 'listening') stopListening(); else void startListening() }}>{state === 'listening' ? <><Pause size={17} /> 듣기 중지</> : isSpeaking ? <><Mic size={17} /> 끼어들어 말하기</> : <><Mic size={17} /> 길게 눌러 말하기</>}</button><button className={`round-control ${cameraEnabled ? 'active-camera' : ''}`} aria-label={cameraEnabled ? '카메라 끄기' : '카메라 켜기'} onClick={() => void toggleCamera()}>{cameraEnabled ? <Camera size={19} /> : <CameraOff size={19} />}</button><button className="round-control" aria-label="대화 종료" onClick={onExit}><X size={20} /></button></div>
         {interim && <div className="interim-caption"><AudioLines size={16} /><span>{interim}</span></div>}

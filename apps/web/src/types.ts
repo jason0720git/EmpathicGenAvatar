@@ -35,7 +35,7 @@ export interface LiveSession {
   renderer_method: RendererMethod
 }
 
-export type RendererMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'fast'
+export type RendererMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'ditto_realtime_trt10' | 'fast'
 
 export type ExpressionIntent = 'neutral' | 'warm' | 'concern'
 

@@ -145,6 +145,14 @@ def test_realtime_fast_lane_requires_deployed_realtime_renderer(tmp_path):
         assert "Ditto Realtime" in response.json()["detail"]
 
 
+def test_trt10_realtime_session_requires_deployed_trt10_renderer(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        response = client.post("/api/live/sessions", json={"avatar_id": avatar["id"], "renderer_method": "ditto_realtime_trt10"})
+        assert response.status_code == 409
+        assert "TensorRT 10" in response.json()["detail"]
+
+
 def test_timing_telemetry_persists_no_conversation_content(tmp_path):
     with client_for(tmp_path) as client:
         response = client.post(

@@ -21,6 +21,7 @@ class Settings:
     worker_shared_token: str | None = None
     fast_avatar_renderer_url: str | None = None
     realtime_avatar_renderer_url: str | None = None
+    trt10_avatar_renderer_url: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -33,6 +34,7 @@ class Settings:
         renderer_url = os.getenv("AVATAR_RENDERER_URL") or None
         fast_renderer_url = os.getenv("FAST_AVATAR_RENDERER_URL") or None
         realtime_renderer_url = os.getenv("REALTIME_AVATAR_RENDERER_URL") or None
+        trt10_renderer_url = os.getenv("TRT10_AVATAR_RENDERER_URL") or None
         if engine == "remote" and not renderer_url:
             raise ValueError("AVATAR_RENDERER_URL is required when AVATAR_ENGINE=remote")
         app_env = os.getenv("APP_ENV", "development").strip().lower()
@@ -52,4 +54,5 @@ class Settings:
             worker_shared_token=os.getenv("WORKER_SHARED_TOKEN") or None,
             fast_avatar_renderer_url=fast_renderer_url.rstrip("/") if fast_renderer_url else None,
             realtime_avatar_renderer_url=realtime_renderer_url.rstrip("/") if realtime_renderer_url else None,
+            trt10_avatar_renderer_url=trt10_renderer_url.rstrip("/") if trt10_renderer_url else None,
         )
