@@ -21,7 +21,7 @@ class AvatarRenderer:
     async def prepare(self, avatar: AvatarOut, source_path: Path) -> Preparation:
         raise NotImplementedError
 
-    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
+    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, audio_path: str | None = None, audio_streaming: bool = False, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         raise NotImplementedError
 
     async def cancel(self, session_id: str) -> None:
@@ -40,7 +40,7 @@ class PreviewRenderer(AvatarRenderer):
         await asyncio.sleep(0.04)
         return Preparation(cache_ref=f"preview:{avatar.id}")
 
-    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
+    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, audio_path: str | None = None, audio_streaming: bool = False, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         visemes = [Viseme(at_ms=index * 105, value=round(0.28 + ((ord(char) * 17) % 63) / 100, 2)) for index, char in enumerate(text[:80]) if not char.isspace()]
         return visemes, RendererOut(mode="preview", status="browser-audio-reactive-preview", applied_motion=motion_plan)
 
@@ -70,8 +70,11 @@ class RemoteRenderer(AvatarRenderer):
         body = response.json()
         return Preparation(cache_ref=body["cache_ref"])
 
-    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
+    async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, audio_path: str | None = None, audio_streaming: bool = False, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         payload: dict[str, Any] = {"avatar_id": avatar.id, "session_id": session_id, "turn_id": turn_id, "text": text}
+        if audio_path is not None:
+            payload["audio_path"] = audio_path
+            payload["audio_streaming"] = audio_streaming
         if self.render_profile is not None:
             payload["render_profile"] = self.render_profile
         if motion_plan is not None:

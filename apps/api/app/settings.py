@@ -16,6 +16,9 @@ class Settings:
     avatar_renderer_url: str | None = None
     ollama_url: str | None = None
     ollama_model: str = "llama3.2:3b"
+    conversation_backend: str = "demo"
+    openai_api_key: str | None = None
+    openai_realtime_model: str = "gpt-realtime-2.1-mini"
     app_env: str = "development"
     api_access_token: str | None = None
     worker_shared_token: str | None = None
@@ -37,6 +40,12 @@ class Settings:
         trt10_renderer_url = os.getenv("TRT10_AVATAR_RENDERER_URL") or None
         if engine == "remote" and not renderer_url:
             raise ValueError("AVATAR_RENDERER_URL is required when AVATAR_ENGINE=remote")
+        conversation_backend = os.getenv("CONVERSATION_BACKEND", "demo").strip().lower()
+        if conversation_backend not in {"demo", "ollama", "openai_realtime"}:
+            raise ValueError("CONVERSATION_BACKEND must be 'demo', 'ollama', or 'openai_realtime'")
+        openai_api_key = os.getenv("OPENAI_API_KEY") or None
+        if conversation_backend == "openai_realtime" and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when CONVERSATION_BACKEND=openai_realtime")
         app_env = os.getenv("APP_ENV", "development").strip().lower()
         api_access_token = os.getenv("API_ACCESS_TOKEN") or None
         if app_env == "production" and not api_access_token:
@@ -49,6 +58,9 @@ class Settings:
             avatar_renderer_url=renderer_url.rstrip("/") if renderer_url else None,
             ollama_url=(os.getenv("OLLAMA_URL") or None),
             ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+            conversation_backend=conversation_backend,
+            openai_api_key=openai_api_key,
+            openai_realtime_model=os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1-mini"),
             app_env=app_env,
             api_access_token=api_access_token,
             worker_shared_token=os.getenv("WORKER_SHARED_TOKEN") or None,

@@ -31,6 +31,7 @@ RendererMethod = Literal["ditto", "ditto_realtime", "ditto_realtime_fast", "ditt
 class CreateSessionIn(BaseModel):
     avatar_id: str
     renderer_method: RendererMethod = "ditto"
+    session_instruction: str | None = Field(default=None, max_length=6_000)
 
 
 class SessionOut(BaseModel):
@@ -39,6 +40,7 @@ class SessionOut(BaseModel):
     state: Literal["active", "ended"]
     created_at: datetime
     renderer_method: RendererMethod = "ditto"
+    session_instruction: str | None = None
 
 
 class TurnIn(BaseModel):
@@ -117,4 +119,4 @@ class TurnOut(BaseModel):
 class HealthOut(BaseModel):
     status: Literal["ok"]
     engine: Literal["preview", "remote"]
-    llm: Literal["demo", "ollama"]
+    llm: Literal["demo", "ollama", "openai-realtime"]

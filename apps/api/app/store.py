@@ -70,13 +70,16 @@ class Store:
                     state TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     active_turn_id TEXT,
-                    renderer_method TEXT NOT NULL DEFAULT 'ditto'
+                    renderer_method TEXT NOT NULL DEFAULT 'ditto',
+                    session_instruction TEXT
                 );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(sessions)")}
             if "renderer_method" not in columns:
                 connection.execute("ALTER TABLE sessions ADD COLUMN renderer_method TEXT NOT NULL DEFAULT 'ditto'")
+            if "session_instruction" not in columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN session_instruction TEXT")
         self._ensure_demo_avatar()
 
     def _ensure_demo_avatar(self) -> None:
@@ -179,19 +182,19 @@ class Store:
             raise KeyError("avatar not found")
         return source_path
 
-    def create_session(self, session_id: str, avatar_id: str, renderer_method: str = "ditto") -> SessionOut:
+    def create_session(self, session_id: str, avatar_id: str, renderer_method: str = "ditto", session_instruction: str | None = None) -> SessionOut:
         self.get_avatar(avatar_id)
         now = _now()
         with self._lock, self._connect() as connection:
-            connection.execute("INSERT INTO sessions(id,avatar_id,state,created_at,renderer_method) VALUES(?,?,?,?,?)", (session_id, avatar_id, "active", now, renderer_method))
-        return SessionOut(id=session_id, avatar_id=avatar_id, state="active", created_at=now, renderer_method=renderer_method)
+            connection.execute("INSERT INTO sessions(id,avatar_id,state,created_at,renderer_method,session_instruction) VALUES(?,?,?,?,?,?)", (session_id, avatar_id, "active", now, renderer_method, session_instruction))
+        return SessionOut(id=session_id, avatar_id=avatar_id, state="active", created_at=now, renderer_method=renderer_method, session_instruction=session_instruction)
 
     def get_session(self, session_id: str) -> SessionOut:
         with self._lock, self._connect() as connection:
-            row = connection.execute("SELECT id, avatar_id, state, created_at, renderer_method FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            row = connection.execute("SELECT id, avatar_id, state, created_at, renderer_method, session_instruction FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             raise KeyError("session not found")
-        return SessionOut(id=row["id"], avatar_id=row["avatar_id"], state=row["state"], created_at=row["created_at"], renderer_method=row["renderer_method"])
+        return SessionOut(id=row["id"], avatar_id=row["avatar_id"], state=row["state"], created_at=row["created_at"], renderer_method=row["renderer_method"], session_instruction=row["session_instruction"])
 
     def set_active_turn(self, session_id: str, turn_id: str | None) -> None:
         with self._lock, self._connect() as connection:

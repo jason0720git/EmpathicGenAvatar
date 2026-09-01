@@ -38,6 +38,7 @@ class RenderIn(BaseModel):
     turn_id: str = Field(min_length=1, max_length=128)
     session_id: str | None = None
     audio_path: str | None = None
+    audio_streaming: bool = False
     text: str = Field(default="", max_length=4_000)
     # Deliberately a named product preset, never an arbitrary client-supplied
     # diffusion-step count. This keeps the quality baseline reproducible.
@@ -899,34 +900,80 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         pcm_input: queue.Queue[np.ndarray | None] = queue.Queue()
         render_task: asyncio.Task[None] | None = None
         try:
-            segments = self._speech_segments(body.text)
-            if not segments:
-                raise RuntimeError("Realtime Ditto received no TTS text")
+            # An external voice file (Marin/Reatime bridge) is authoritative:
+            # Ditto and browser packets must consume exactly the same samples.
+            if body.audio_path and body.audio_streaming:
+                external = safe_data_path(self.config.data_root, body.audio_path)
+                done = external.with_suffix(".done")
+                metrics.mark("external_audio_stream_ready")
+                render_task = asyncio.create_task(
+                    asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, metrics, pcm_input),
+                    name=f"ditto-realtime-sdk-{body.turn_id}",
+                )
+                offset = 0
+                while True:
+                    if external.is_file():
+                        length = external.stat().st_size
+                        readable = length - (length - offset) % 2
+                        if readable > offset:
+                            with external.open("rb") as stream:
+                                stream.seek(offset)
+                                chunk = stream.read(readable - offset)
+                            pcm = np.frombuffer(chunk, dtype=np.int16).copy()
+                            timeline.append(pcm)
+                            pcm_input.put(pcm)
+                            offset = readable
+                            metrics.mark("external_audio_first_pcm")
+                    if done.is_file():
+                        timeline.finish()
+                        pcm_input.put(None)
+                        break
+                    await asyncio.sleep(0.012)
+                await render_task
+                with contextlib.suppress(FileNotFoundError):
+                    external.unlink()
+                with contextlib.suppress(FileNotFoundError):
+                    done.unlink()
+            elif body.audio_path:
+                external = safe_data_path(self.config.data_root, body.audio_path)
+                if not external.is_file():
+                    raise RuntimeError("Realtime Ditto external audio is missing")
+                metrics.mark("external_audio_ready")
+                with wave.open(str(external), "rb") as wav:
+                    if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or wav.getframerate() != 16_000:
+                        raise RuntimeError("Realtime Ditto external audio must be 16 kHz mono PCM WAV")
+                    pcm = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16).copy()
+                metrics.mark("external_audio_loaded")
+            else:
+                segments = self._speech_segments(body.text)
+                if not segments:
+                    raise RuntimeError("Realtime Ditto received no TTS text")
 
-            # Ditto's motion planner needs the exact media duration.  The
+                # Ditto's motion planner needs the exact media duration.  The
             # former per-sentence feed used a character-count estimate, so a
             # long voice could outlast the generated motion.  Run the tiny
             # local TTS fragments concurrently, concatenate in text order,
             # then make PCM duration the sole source of truth for both tracks.
-            metrics.mark("tts_started")
-            synthesis_tasks = [
+                metrics.mark("tts_started")
+                synthesis_tasks = [
                 asyncio.create_task(self._synthesize_pcm(segment, audio_dir / f"{body.turn_id}-{index}.wav"))
                 for index, segment in enumerate(segments)
             ]
-            await asyncio.wait(synthesis_tasks, return_when=asyncio.FIRST_COMPLETED)
-            metrics.mark("tts_first_pcm_ready")
-            pcm_parts = await asyncio.gather(*synthesis_tasks)
-            metrics.mark("tts_all_pcm_ready")
-            pcm = np.concatenate(pcm_parts) if len(pcm_parts) > 1 else pcm_parts[0]
-            timeline.append(pcm)
-            timeline.finish()
-            render_task = asyncio.create_task(
-                asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, metrics, pcm_input),
-                name=f"ditto-realtime-sdk-{body.turn_id}",
-            )
-            pcm_input.put(pcm)
-            pcm_input.put(None)
-            await render_task
+                await asyncio.wait(synthesis_tasks, return_when=asyncio.FIRST_COMPLETED)
+                metrics.mark("tts_first_pcm_ready")
+                pcm_parts = await asyncio.gather(*synthesis_tasks)
+                metrics.mark("tts_all_pcm_ready")
+                pcm = np.concatenate(pcm_parts) if len(pcm_parts) > 1 else pcm_parts[0]
+            if not body.audio_streaming:
+                timeline.append(pcm)
+                timeline.finish()
+                render_task = asyncio.create_task(
+                    asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, metrics, pcm_input),
+                    name=f"ditto-realtime-sdk-{body.turn_id}",
+                )
+                pcm_input.put(pcm)
+                pcm_input.put(None)
+                await render_task
             # Allow thread-safe frame callbacks to enter the asyncio queue
             # before publishing end-of-turn to the browser.
             await asyncio.sleep(0)
@@ -987,7 +1034,10 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
 
         # PCM duration is the clock contract.  This gives MotionStitch the
         # same endpoint as audio and clips its causal tail to that endpoint.
-        target_frames = timeline.frame_count()
+        # An audio stream has no final duration during setup.  Controls are
+        # therefore provisioned for a bounded response; the PCM-owned timeline
+        # still clips packets exactly when the producer marks completion.
+        target_frames = 750 if body.audio_streaming else timeline.frame_count()
         motion_plan = body.motion_plan or MotionPlan()
         ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames)
         sink = MjpegFrameSink(

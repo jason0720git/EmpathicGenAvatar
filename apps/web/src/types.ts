@@ -33,6 +33,7 @@ export interface LiveSession {
   state: 'active' | 'ended'
   created_at: string
   renderer_method: RendererMethod
+  session_instruction?: string
 }
 
 export type RendererMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'ditto_realtime_trt10' | 'fast'

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 import httpx
 
-from .conversation import ConversationProvider, OllamaConversation, SafeDemoConversation
+from .conversation import ConversationProvider, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
 from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn
 from .quality import ImageValidationError, inspect_image
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
@@ -36,7 +36,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     trt10_renderer: AvatarRenderer | None = RemoteRenderer(
         config.trt10_avatar_renderer_url, config.worker_shared_token, stream_prefix="/avatar-stream-trt10/"
     ) if config.trt10_avatar_renderer_url else None
-    conversation: ConversationProvider = OllamaConversation(config.ollama_url, config.ollama_model) if config.ollama_url else SafeDemoConversation()
+    if config.conversation_backend == "openai_realtime":
+        assert config.openai_api_key is not None
+        conversation: ConversationProvider = OpenAIRealtimeConversation(config.openai_api_key, config.openai_realtime_model, config.data_dir)
+    elif config.conversation_backend == "ollama":
+        if not config.ollama_url:
+            raise ValueError("OLLAMA_URL is required when CONVERSATION_BACKEND=ollama")
+        conversation = OllamaConversation(config.ollama_url, config.ollama_model)
+    else:
+        conversation = SafeDemoConversation()
     upload_dir = config.data_dir / "uploads"
     telemetry_path = config.data_dir / "telemetry" / "turn-events.jsonl"
     telemetry_lock = threading.Lock()
@@ -217,7 +225,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as error:
                     label = "Ditto Realtime TensorRT 10" if body.renderer_method == "ditto_realtime_trt10" else "Ditto Realtime Fast Lane" if body.renderer_method == "ditto_realtime_fast" else "Ditto Realtime" if body.renderer_method == "ditto_realtime" else "Fast Live" if body.renderer_method == "fast" else "Ditto Default"
                     raise HTTPException(status_code=502, detail=f"{label} GPU 아바타 준비에 실패했습니다.") from error
-        return store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method)
+        instruction = body.session_instruction.strip() if body.session_instruction else None
+        session = store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method, instruction)
+        try:
+            await conversation.start_session(session.id, persona=avatar.persona, session_instruction=instruction)
+        except Exception as error:
+            store.end_session(session.id)
+            raise HTTPException(status_code=502, detail="OpenAI Realtime 세션 연결에 실패했습니다.") from error
+        return session
 
     @app.post("/api/live/sessions/{session_id}/turns", response_model=TurnOut)
     async def create_turn(session_id: str, body: TurnIn) -> TurnOut:
@@ -228,16 +243,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         selected_renderer = _renderer_for_method(session.renderer_method, renderer, realtime_renderer, trt10_renderer, fast_renderer)
         turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
-        assistant_text = await conversation.respond(persona=avatar.persona, user_text=body.text.strip())
+        conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id)
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
         visemes, renderer_out = await selected_renderer.render(
-            avatar, session_id=session_id, turn_id=turn_id, text=assistant_text, motion_plan=body.motion_plan
+            avatar,
+            session_id=session_id,
+            turn_id=turn_id,
+            text=conversation_response.text,
+            audio_path=conversation_response.audio_path,
+            audio_streaming=conversation_response.audio_streaming,
+            motion_plan=body.motion_plan,
         )
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
         store.set_active_turn(session_id, None)
-        return TurnOut(turn_id=turn_id, assistant_text=assistant_text, visemes=visemes, renderer=renderer_out)
+        return TurnOut(turn_id=turn_id, assistant_text=conversation_response.text, visemes=visemes, renderer=renderer_out)
+
+    @app.get("/api/live/sessions/{session_id}/turns/{turn_id}/caption")
+    async def get_turn_caption(session_id: str, turn_id: str) -> dict[str, str | bool | None]:
+        _session_or_404(store, session_id)
+        caption = conversation.caption_status(session_id, turn_id)
+        if caption is None:
+            return {"text": None, "done": False}
+        text, done = caption
+        return {"text": text, "done": done}
 
     @app.post("/api/live/sessions/{session_id}/interrupt")
     async def interrupt_session(session_id: str) -> dict[str, str]:
@@ -256,6 +286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.end_session(session_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.") from error
+        await conversation.close_session(session_id)
         return Response(status_code=204)
 
     @app.websocket("/ws/live/{session_id}")
@@ -296,15 +327,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 turn_id = str(uuid.uuid4())
                 store.set_active_turn(session_id, turn_id)
                 await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
-                answer = await conversation.respond(persona=avatar.persona, user_text=text)
+                answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id)
                 if not store.is_active_turn(session_id, turn_id):
                     await websocket.send_json({"type": "turn.cancelled", "turn_id": turn_id})
                     continue
                 visemes, render_out = await selected_renderer.render(
-                    avatar, session_id=session_id, turn_id=turn_id, text=answer, motion_plan=turn_body.motion_plan
+                    avatar,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    text=answer.text,
+                    audio_path=answer.audio_path,
+                    audio_streaming=answer.audio_streaming,
+                    motion_plan=turn_body.motion_plan,
                 )
                 store.set_active_turn(session_id, None)
-                await websocket.send_json({"type": "caption.final", "turn_id": turn_id, "text": answer})
+                await websocket.send_json({"type": "caption.final", "turn_id": turn_id, "text": answer.text})
                 await websocket.send_json({"type": "renderer", "turn_id": turn_id, "visemes": [item.model_dump() for item in visemes], "renderer": render_out.model_dump()})
         except WebSocketDisconnect:
             return

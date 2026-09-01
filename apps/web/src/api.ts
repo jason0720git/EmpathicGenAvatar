@@ -50,16 +50,18 @@ export const api = {
     return request<Avatar>('/api/avatars', { method: 'POST', body: form })
   },
   deleteAvatar: (id: string) => request<void>(`/api/avatars/${id}`, { method: 'DELETE' }),
-  createSession: (avatarId: string, rendererMethod: RendererMethod) =>
+  createSession: (avatarId: string, rendererMethod: RendererMethod, sessionInstruction?: string) =>
     request<LiveSession>('/api/live/sessions', {
       method: 'POST',
-      body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod }),
+      body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction }),
     }),
   sendTurn: (sessionId: string, text: string, motionPlan?: MotionPlan, clientTurnId?: string) =>
     request<TurnResponse>(`/api/live/sessions/${sessionId}/turns`, {
       method: 'POST',
       body: JSON.stringify({ text, motion_plan: motionPlan, client_turn_id: clientTurnId }),
     }),
+  turnCaption: (sessionId: string, turnId: string) =>
+    request<{ text: string | null; done: boolean }>(`/api/live/sessions/${sessionId}/turns/${turnId}/caption`),
   interrupt: (sessionId: string) =>
     request<{ state: string }>(`/api/live/sessions/${sessionId}/interrupt`, { method: 'POST' }),
   endSession: (sessionId: string) =>
