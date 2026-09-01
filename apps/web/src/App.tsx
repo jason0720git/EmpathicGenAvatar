@@ -305,7 +305,7 @@ function Metric({ icon, label, value, detail }: { icon: React.ReactNode; label: 
 
 function idleUrl(avatarId: string, variant: number, revision: number) {
   const base = import.meta.env.VITE_API_BASE_URL ?? ''
-  return `${base}/api/avatars/${encodeURIComponent(avatarId)}/idle/${variant}?v=${revision}`
+  return `${base}/api/avatars/${encodeURIComponent(avatarId)}/idle/${variant}/mjpeg?v=${revision}`
 }
 
 function MethodPicker({ avatar, selected, instruction, onInstructionChange, onSelect, onBack, onStart }: {
@@ -495,6 +495,7 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
   const submitVoiceOnEndRef = useRef(false)
   const voiceSeenRef = useRef(false)
   const lastVoiceActivityRef = useRef(0)
+  const realtimeVisualTimerRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     mountedRef.current = true
@@ -518,6 +519,7 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
       stopCamera(cameraStreamRef.current)
       realtimeSocketRef.current?.close()
       if (protectedAutoTimerRef.current) window.clearTimeout(protectedAutoTimerRef.current)
+      if (realtimeVisualTimerRef.current) window.clearTimeout(realtimeVisualTimerRef.current)
       void realtimeAudioRef.current?.close()
       if (sessionRef.current && apiOnline) void api.endSession(sessionRef.current).catch(() => undefined)
       sessionRef.current = null
@@ -539,10 +541,13 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
     // Variant 2 contains a Ditto-generated acknowledgement nod. Switching
     // into it at the start of listening makes the VAD/recording state feel
     // attentive without keeping the speaking renderer running in silence.
-    if (state === 'listening') {
-      setIdleVariant(2)
-    } else if (state === 'ready') {
-      setIdleVariant(Math.floor(Math.random() * 2))
+    if (state === 'listening') setIdleVariant(2)
+    // Before a reply can begin, restart the neutral loop at frame zero. Both
+    // frame zero and the first visible Ditto speech frame use the registered
+    // source pose, allowing a match cut instead of two misaligned faces.
+    if (state === 'thinking') {
+      setIdleVariant(0)
+      setIdleRevision((value) => value + 1)
     }
   }, [state])
 
@@ -564,6 +569,7 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
   }, [renderedAudio, streamReady])
 
   const stopRealtime = () => {
+    if (realtimeVisualTimerRef.current) window.clearTimeout(realtimeVisualTimerRef.current)
     realtimeSocketRef.current?.close()
     realtimeSocketRef.current = null
     void realtimeAudioRef.current?.close()
@@ -706,7 +712,15 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
         void decodeAndDraw(ptsMs, payload)
       } else if (kind === 3) {
         ended = true
-        const finishIn = Math.max(0, finalAudioAt - context.currentTime) * 1000 + 80
+        // The renderer deliberately emits a 12-frame silent tail after
+        // speech. It closes the mouth and settles pose before idle takes
+        // ownership, so keep it visible after the final PCM packet.
+        const finishIn = Math.max(0, finalAudioAt - context.currentTime) * 1000 + 560
+        // Preload the canonical idle frame while the final speech frame is
+        // still visible. The resulting hand-off has one face at one pose,
+        // rather than a blurred overlap of two independently generated poses.
+        setIdleVariant(0)
+        setIdleRevision((value) => value + 1)
         window.setTimeout(() => {
           if (ended) {
             const nextBuffer = jpegDecodeFailures || videoPtsGaps
@@ -944,8 +958,8 @@ function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { a
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
-          <video className={`idle-avatar-video ${state === 'listening' ? 'listening' : ''} ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} src={idleUrl(avatar.id, idleVariant, idleRevision)} autoPlay loop muted playsInline onCanPlay={() => setIdleAvailable(true)} onError={() => setIdleAvailable(false)} aria-label={`${avatar.name} 대기 아바타 영상`} />
-          {realtimeActive ? <canvas ref={realtimeCanvasRef} className="rendered-avatar-video" aria-label={`${avatar.name} 실시간 아바타 영상`} /> : renderedVideo && (renderedVideo.includes('/live-media/') ? <img className="rendered-avatar-video" src={renderedVideo} alt={`${avatar.name} 실시간 아바타 영상`} onLoad={() => setStreamReady(true)} onError={() => { setRenderedVideo(undefined); setStreamReady(true) }} /> : <video className="rendered-avatar-video" src={renderedVideo} autoPlay playsInline onEnded={() => { setRenderedVideo(undefined); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedVideo(undefined); setState('ready') }} />)}
+          <img className={`idle-avatar-video ${state === 'listening' ? 'listening' : ''} ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} src={idleUrl(avatar.id, idleVariant, idleRevision)} onLoad={() => setIdleAvailable(true)} onError={() => setIdleAvailable(false)} alt="" aria-label={`${avatar.name} 대기 아바타 영상`} />
+          {realtimeActive ? <canvas ref={realtimeCanvasRef} className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} aria-label={`${avatar.name} 실시간 아바타 영상`} /> : renderedVideo && (renderedVideo.includes('/live-media/') ? <img className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} alt={`${avatar.name} 실시간 아바타 영상`} onLoad={() => setStreamReady(true)} onError={() => { setRenderedVideo(undefined); setStreamReady(true) }} /> : <video className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} autoPlay playsInline onEnded={() => { setRenderedVideo(undefined); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedVideo(undefined); setState('ready') }} />)}
           {renderedAudio && <audio ref={renderedAudioRef} src={renderedAudio} preload="auto" onEnded={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} />}
           <div className={`camera-pip ${cameraEnabled ? 'visible' : ''}`}>
             <video ref={cameraVideoRef} muted playsInline aria-label="내 카메라 로컬 미리보기" />

@@ -119,7 +119,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   object-fit: contain;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 260ms ease;
+  /* A double-exposed face reads as blur/tremble. The hand-off is a
+     canonical-pose match cut, not an opacity blend. */
+  transition: none;
 }
 .idle-avatar-video.ready { opacity: 1; }
 .idle-avatar-video.hidden { opacity: 0; }

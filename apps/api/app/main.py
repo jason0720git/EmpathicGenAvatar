@@ -186,6 +186,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="idle loop not prepared") from error
         return Response(content=body, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
 
+    @app.get("/api/avatars/{avatar_id}/idle/{variant}/mjpeg")
+    async def idle_avatar_mjpeg(avatar_id: str, variant: int) -> StreamingResponse:
+        _avatar_or_404(store, avatar_id)
+        selected = idle_renderer()
+        if selected is None or variant < 0 or variant > 2:
+            raise HTTPException(status_code=404, detail="idle loop not found")
+
+        async def proxy_stream():
+            async with httpx.AsyncClient(timeout=httpx.Timeout(180, read=None)) as client:
+                url = f"{selected.base_url}/v1/assets/idle/{avatar_id}/{variant}/mjpeg"
+                async with client.stream("GET", url, headers=selected.headers) as upstream:
+                    if upstream.status_code == 404:
+                        return
+                    upstream.raise_for_status()
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(
+            proxy_stream(),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/api/rendered/{filename}")
     async def rendered_asset(filename: str) -> Response:
         if not isinstance(renderer, RemoteRenderer):
