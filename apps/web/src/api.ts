@@ -50,6 +50,7 @@ export const api = {
     return request<Avatar>('/api/avatars', { method: 'POST', body: form })
   },
   deleteAvatar: (id: string) => request<void>(`/api/avatars/${id}`, { method: 'DELETE' }),
+  prepareIdle: (id: string) => request<{ status: string }>(`/api/avatars/${id}/idle`, { method: 'POST' }),
   createSession: (avatarId: string, rendererMethod: RendererMethod, sessionInstruction?: string) =>
     request<LiveSession>('/api/live/sessions', {
       method: 'POST',

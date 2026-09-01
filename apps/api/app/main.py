@@ -156,6 +156,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=300"})
 
+    def idle_renderer() -> RemoteRenderer | None:
+        # Keep idle rendering isolated on the TRT10 worker when it is present;
+        # a prepared loop is then served by the same worker for every method.
+        for candidate in (trt10_renderer, realtime_renderer, renderer):
+            if isinstance(candidate, RemoteRenderer):
+                return candidate
+        return None
+
+    @app.post("/api/avatars/{avatar_id}/idle", status_code=202)
+    async def prepare_idle_avatar(avatar_id: str) -> dict[str, str]:
+        avatar = _avatar_or_404(store, avatar_id)
+        source_path = store.get_source_path(avatar.id)
+        selected = idle_renderer()
+        if selected is None or source_path is None or not source_path.is_file():
+            raise HTTPException(status_code=409, detail="Ditto idle renderer is not available")
+        await selected.prepare_idle(avatar, source_path)
+        return {"status": "ready"}
+
+    @app.get("/api/avatars/{avatar_id}/idle/{variant}")
+    async def idle_avatar_asset(avatar_id: str, variant: int) -> Response:
+        _avatar_or_404(store, avatar_id)
+        selected = idle_renderer()
+        if selected is None:
+            raise HTTPException(status_code=404, detail="idle loop not found")
+        try:
+            body, media_type = await selected.read_idle_asset(avatar_id, variant)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="idle loop not prepared") from error
+        return Response(content=body, media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+
     @app.get("/api/rendered/{filename}")
     async def rendered_asset(filename: str) -> Response:
         if not isinstance(renderer, RemoteRenderer):

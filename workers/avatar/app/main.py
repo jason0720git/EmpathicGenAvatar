@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import secrets
+import subprocess
 import struct
 import sys
 import threading
@@ -31,6 +32,12 @@ class PrepareIn(BaseModel):
     avatar_version: int = Field(ge=1)
     source_path: str
     quality: dict | None = None
+
+
+class IdleIn(PrepareIn):
+    """One-shot full-frame idle-loop preparation for an approved avatar."""
+
+    variants: int = Field(default=3, ge=1, le=3)
 
 
 class RenderIn(BaseModel):
@@ -111,6 +118,33 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
         # NodIntent, so camera-derived noise cannot create a violent motion.
         envelope = float(np.sin(np.pi * phase))
         controls[frame]["delta_pitch"] = base["delta_pitch"] + plan.nod.amplitude_deg * envelope
+    return controls
+
+
+def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, float]]:
+    """A conservative, seamless idle trajectory in Ditto's pose space.
+
+    The paths return to their start position so browser-side looping does not
+    create a pose jump. Mouth movement remains audio-driven and therefore
+    stays closed for the silent idle signal.
+    """
+    controls: dict[int, dict[str, float]] = {}
+    cycles = (1.0, 1.25, 0.75)[variant % 3]
+    phase_offset = (0.0, 0.7, 1.4)[variant % 3]
+    for frame in range(frame_count):
+        phase = 2 * np.pi * cycles * frame / max(1, frame_count - 1)
+        yaw = 0.8 * np.sin(phase + phase_offset)
+        pitch = 0.38 * np.sin(phase * 0.5 + phase_offset) + 0.16 * np.sin(phase * 2)
+        roll = 0.22 * np.sin(phase * 0.7 + phase_offset)
+        # Variant two includes one deliberately tiny acknowledgement nod.
+        if variant % 3 == 2:
+            nod_phase = frame / max(1, frame_count - 1)
+            pitch += 1.15 * np.sin(np.pi * nod_phase) ** 2
+        controls[frame] = {
+            "delta_yaw": float(yaw),
+            "delta_pitch": float(pitch),
+            "delta_roll": float(roll),
+        }
     return controls
 
 
@@ -342,6 +376,58 @@ class DiscardFrameSink:
         return None
 
 
+class Mp4FrameSink:
+    """Write complete Ditto frames to a short, browser-playable idle video."""
+
+    def __init__(self, output: Path, expected_frames: int, skip_initial_frames: int = 0) -> None:
+        self.output = output
+        self.expected_frames = expected_frames
+        self.skip_initial_frames = skip_initial_frames
+        self.source_frame_count = 0
+        self.frame_count = 0
+        self.encoder: subprocess.Popen[bytes] | None = None
+
+    def __call__(self, frame_rgb: np.ndarray, fmt: str = "rgb") -> None:
+        self.source_frame_count += 1
+        if self.source_frame_count <= self.skip_initial_frames or self.frame_count >= self.expected_frames:
+            return
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR) if fmt == "rgb" else frame_rgb
+        if self.encoder is None:
+            height, width = frame_bgr.shape[:2]
+            self.encoder = subprocess.Popen(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "rawvideo", "-pixel_format", "bgr24",
+                    "-video_size", f"{width}x{height}", "-framerate", "25",
+                    "-i", "-", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart", str(self.output),
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        assert self.encoder.stdin is not None
+        self.encoder.stdin.write(frame_bgr.tobytes())
+        self.frame_count += 1
+
+    def close(self) -> None:
+        if self.encoder is None:
+            return
+        assert self.encoder.stdin is not None
+        self.encoder.stdin.close()
+        detail = b""
+        if self.encoder.stderr is not None:
+            detail = self.encoder.stderr.read()
+        returncode = self.encoder.wait()
+        if returncode != 0 or not self.output.is_file() or self.output.stat().st_size < 1024:
+            message = detail.decode("utf-8", errors="replace")[-400:]
+            raise RuntimeError(
+                "Could not encode idle-video MP4 "
+                f"(source_frames={self.source_frame_count}, written_frames={self.frame_count}, "
+                f"ffmpeg={message or 'no output'})"
+            )
+
+
 @dataclass
 class LiveTurn:
     frames: asyncio.Queue[bytes]
@@ -470,6 +556,80 @@ class DittoLiveRuntime:
                 # Deliver the callback scheduled by MjpegFrameSink before a
                 # turn may reuse this prepared avatar.
                 await asyncio.sleep(0)
+
+    def idle_path(self, avatar_id: str, variant: int) -> Path:
+        safe_avatar = hashlib.sha256(avatar_id.encode("utf-8")).hexdigest()[:24]
+        return self.config.data_root / "idle" / f"{safe_avatar}-v{variant}.mp4"
+
+    async def prepare_idle(self, avatar_id: str, source: Path, variants: int = 3) -> list[Path]:
+        """Generate immutable, full-frame idle variants once per avatar."""
+        await self.prepare(avatar_id, source)
+        async with self.lock:
+            outputs: list[Path] = []
+            for variant in range(variants):
+                output = self.idle_path(avatar_id, variant)
+                if output.is_file() and output.stat().st_size > 1_024:
+                    outputs.append(output)
+                    continue
+                output.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(self._generate_idle_blocking, avatar_id, variant, output)
+                outputs.append(output)
+            return outputs
+
+    def _generate_idle_blocking(self, avatar_id: str, variant: int, output: Path) -> None:
+        started = time.monotonic()
+        sdk = self._load_sdk()
+        frame_count = 200  # eight seconds at the shared 25-fps media clock
+        sink = Mp4FrameSink(output, expected_frames=frame_count, skip_initial_frames=DITTO_PREROLL_FRAMES)
+        ctrl_info = build_idle_ctrl_info(variant, frame_count + DITTO_PREROLL_FRAMES)
+        # An exact all-zero waveform is discarded by Ditto's streaming HuBERT
+        # frontend and never reaches the motion pipeline. A very-low-energy,
+        # deterministic breath signal keeps the model clock running without
+        # producing visible speech articulation.
+        sample_count = frame_count * 640
+        sample_clock = np.arange(sample_count, dtype=np.float32) / 16_000.0
+        rng = np.random.default_rng(10_000 + variant)
+        breath = (
+            0.0009 * np.sin(2 * np.pi * (0.14 + variant * 0.015) * sample_clock)
+            + 0.00025 * rng.standard_normal(sample_count, dtype=np.float32)
+        )
+        silence = breath.astype(np.float32, copy=False)
+        try:
+            sdk.setup(
+                "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
+                sampling_timesteps=self.config.sampling_timesteps,
+                emo=DITTO_EMOTION_INDEX["neutral"], ctrl_info=ctrl_info,
+            )
+            sdk.setup_Nd(frame_count, ctrl_info=ctrl_info)
+            chunksize = DITTO_CHUNKSIZE
+            window_samples = int(sum(chunksize) * 0.04 * 16000) + 80
+            stride_samples = chunksize[1] * 640
+            padded = np.concatenate([np.zeros((chunksize[0] * 640,), dtype=np.float32), silence])
+            for start in range(0, len(padded), stride_samples):
+                chunk = padded[start:start + window_samples]
+                if len(chunk) < window_samples:
+                    chunk = np.pad(chunk, (0, window_samples - len(chunk)))
+                sdk.run_chunk(chunk, chunksize)
+        finally:
+            sdk.close()
+            sink.close()
+        if sink.frame_count < frame_count:
+            output.unlink(missing_ok=True)
+            raise RuntimeError(f"Idle Ditto render was incomplete ({sink.frame_count}/{frame_count} frames)")
+        print(
+            "Ditto idle loop generated: "
+            + json.dumps(
+                {
+                    "avatar_id": avatar_id,
+                    "variant": variant,
+                    "frames": sink.frame_count,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            flush=True,
+        )
 
     async def synthesize(self, text: str, output: Path) -> Path:
         process = await asyncio.create_subprocess_exec(
@@ -1288,6 +1448,7 @@ def create_app() -> FastAPI:
     # the same image-to-motion model but receives incremental TTS PCM.
     live_runtime = DittoLiveRuntime(config) if config.mode == "ditto_live" else None
     realtime_runtime = DittoRealtimeRuntime(config) if config.mode == "ditto_realtime" else None
+    idle_runtime = realtime_runtime or live_runtime
     musetalk_runtime = MuseTalkLiveRuntime(config) if config.mode == "musetalk_live" else None
     renders = config.data_root / "rendered"
     audio_assets = config.data_root / "audio"
@@ -1328,6 +1489,25 @@ def create_app() -> FastAPI:
         cache_ref = f"{renderer_name}:{body.avatar_id}:{body.avatar_version}:{digest[:12]}"
         cache.save(body.avatar_id, {"cache_ref": cache_ref, "source_path": str(source), "source_sha256": digest, "avatar_version": body.avatar_version, "quality": body.quality, "renderer": renderer_name})
         return {"cache_ref": cache_ref, "state": "ready"}
+
+    @app.post("/v1/avatars/idle")
+    async def prepare_idle(body: IdleIn) -> dict[str, object]:
+        if idle_runtime is None:
+            raise HTTPException(status_code=409, detail="Idle loops require a Ditto live renderer")
+        source = safe_data_path(config.data_root, body.source_path)
+        if not source.is_file():
+            raise HTTPException(status_code=404, detail="source image does not exist in shared data volume")
+        outputs = await idle_runtime.prepare_idle(body.avatar_id, source, body.variants)
+        return {"status": "ready", "variants": len(outputs)}
+
+    @app.get("/v1/assets/idle/{avatar_id}/{variant}")
+    async def idle_asset(avatar_id: str, variant: int) -> FileResponse:
+        if idle_runtime is None or variant < 0 or variant > 2:
+            raise HTTPException(status_code=404, detail="idle loop not found")
+        path = idle_runtime.idle_path(avatar_id, variant)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="idle loop not prepared")
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
 
     @app.post("/v1/turns/render")
     async def render(body: RenderIn) -> dict:
@@ -1378,6 +1558,9 @@ def create_app() -> FastAPI:
     @app.delete("/v1/avatars/{avatar_id}", status_code=204)
     async def delete_avatar(avatar_id: str):
         cache.delete(avatar_id)
+        if idle_runtime is not None:
+            for variant in range(3):
+                idle_runtime.idle_path(avatar_id, variant).unlink(missing_ok=True)
         # Derived Ditto tensors must live under a per-avatar cache directory in
         # the streaming implementation and be removed here as well.
         return None

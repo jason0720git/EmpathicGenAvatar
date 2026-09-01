@@ -24,6 +24,12 @@ class AvatarRenderer:
     async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, audio_path: str | None = None, audio_streaming: bool = False, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         raise NotImplementedError
 
+    async def prepare_idle(self, avatar: AvatarOut, source_path: Path) -> None:
+        return None
+
+    async def read_idle_asset(self, avatar_id: str, variant: int) -> tuple[bytes, str]:
+        raise FileNotFoundError(avatar_id)
+
     async def cancel(self, session_id: str) -> None:
         return None
 
@@ -69,6 +75,28 @@ class RemoteRenderer(AvatarRenderer):
             response.raise_for_status()
         body = response.json()
         return Preparation(cache_ref=body["cache_ref"])
+
+    async def prepare_idle(self, avatar: AvatarOut, source_path: Path) -> None:
+        payload: dict[str, Any] = {
+            "avatar_id": avatar.id,
+            "source_path": str(source_path),
+            "avatar_version": 1,
+            "quality": avatar.quality.model_dump() if avatar.quality else None,
+            "variants": 3,
+        }
+        async with httpx.AsyncClient(timeout=900) as client:
+            response = await client.post(f"{self.base_url}/v1/avatars/idle", json=payload, headers=self.headers)
+            response.raise_for_status()
+
+    async def read_idle_asset(self, avatar_id: str, variant: int) -> tuple[bytes, str]:
+        if variant < 0 or variant > 2:
+            raise FileNotFoundError(avatar_id)
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{self.base_url}/v1/assets/idle/{avatar_id}/{variant}", headers=self.headers)
+            if response.status_code == 404:
+                raise FileNotFoundError(avatar_id)
+            response.raise_for_status()
+        return response.content, response.headers.get("content-type", "video/mp4")
 
     async def render(self, avatar: AvatarOut, *, session_id: str, turn_id: str, text: str, audio_path: str | None = None, audio_streaming: bool = False, motion_plan: MotionPlan | None = None) -> tuple[list[Viseme], RendererOut]:
         payload: dict[str, Any] = {"avatar_id": avatar.id, "session_id": session_id, "turn_id": turn_id, "text": text}
