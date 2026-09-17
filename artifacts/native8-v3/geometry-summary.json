@@ -1,0 +1,77 @@
+[
+  {
+    "emotion": "neutral",
+    "frames_measured": 67,
+    "speech_mouth_gap_p90": 0.26259041923737514,
+    "silence_mouth_gap_median": 0.0005830639173593741,
+    "eye_aperture_median": [
+      0.3225366543361579,
+      0.3117730935372691
+    ],
+    "minimum_eye_aperture": [
+      0.3061501903324918,
+      0.29125113191451485
+    ],
+    "minimum_eye_aperture_ms": 3680
+  },
+  {
+    "emotion": "fear",
+    "frames_measured": 67,
+    "speech_mouth_gap_p90": 0.28337945685840277,
+    "silence_mouth_gap_median": 0.004190204085700834,
+    "eye_aperture_median": [
+      0.35146466206135885,
+      0.342319909884438
+    ],
+    "minimum_eye_aperture": [
+      0.3323567859779224,
+      0.32085860298445107
+    ],
+    "minimum_eye_aperture_ms": 5280
+  },
+  {
+    "emotion": "sad",
+    "frames_measured": 67,
+    "speech_mouth_gap_p90": 0.32358582727639007,
+    "silence_mouth_gap_median": 0.0023468664734584335,
+    "eye_aperture_median": [
+      0.3036391041158004,
+      0.29791900621405487
+    ],
+    "minimum_eye_aperture": [
+      0.29358570164796405,
+      0.29256512405784457
+    ],
+    "minimum_eye_aperture_ms": 240
+  },
+  {
+    "emotion": "surprise",
+    "frames_measured": 67,
+    "speech_mouth_gap_p90": 0.2637928693627439,
+    "silence_mouth_gap_median": 0.003653319704671465,
+    "eye_aperture_median": [
+      0.37994507226018437,
+      0.3593773380535493
+    ],
+    "minimum_eye_aperture": [
+      0.33727606552370426,
+      0.3244542549668223
+    ],
+    "minimum_eye_aperture_ms": 5280
+  },
+  {
+    "emotion": "contempt",
+    "frames_measured": 67,
+    "speech_mouth_gap_p90": 0.13460306462300362,
+    "silence_mouth_gap_median": 0.002490504241543509,
+    "eye_aperture_median": [
+      0.28186248447375273,
+      0.2911824558789882
+    ],
+    "minimum_eye_aperture": [
+      0.26430765592382377,
+      0.27519442037955916
+    ],
+    "minimum_eye_aperture_ms": 4400
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "emotion": "happy",
+    "mode": "off",
+    "turn_id": "native8-happy-e1b0fd76",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "happy",
+    "mode": "native",
+    "turn_id": "native8-happy-3371ad74",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "happy",
+    "mode": "legacy",
+    "turn_id": "native8-happy-18e5b86f",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "happy",
+    "mode": "speech_safe",
+    "turn_id": "native8-happy-5b2c9b78",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "angry",
+    "mode": "off",
+    "turn_id": "native8-angry-bac69bab",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "angry",
+    "mode": "native",
+    "turn_id": "native8-angry-6173ff15",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "angry",
+    "mode": "legacy",
+    "turn_id": "native8-angry-2e7a24df",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "angry",
+    "mode": "speech_safe",
+    "turn_id": "native8-angry-388893ce",
+    "audio_packets": 110,
+    "video_frames": 134
+  }
+]

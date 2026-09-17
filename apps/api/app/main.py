@@ -5,8 +5,12 @@ import json
 import mimetypes
 import secrets
 import threading
+import time
 import uuid
+from collections import deque
+from dataclasses import replace
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -15,8 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 import httpx
 
+from .behavior import BehaviorDecision, BehaviorPlanner
 from .conversation import ConversationProvider, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
-from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn
+from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn, ExpressionFeedbackIn
 from .quality import ImageValidationError, inspect_image
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
 from .settings import Settings
@@ -45,9 +50,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conversation = OllamaConversation(config.ollama_url, config.ollama_model)
     else:
         conversation = SafeDemoConversation()
+    behavior_planner = BehaviorPlanner()
     upload_dir = config.data_dir / "uploads"
     telemetry_path = config.data_dir / "telemetry" / "turn-events.jsonl"
     telemetry_lock = threading.Lock()
+    empathic_debug_path = config.data_dir / "telemetry" / "empathic-decisions.jsonl"
+    empathic_debug_lock = threading.Lock()
+    logged_caption_turns: set[str] = set()
+
+    def record_empathic_debug(event: str, payload: dict[str, object]) -> None:
+        """Persist local expression diagnostics only when explicitly enabled.
+
+        Unlike timing telemetry, this may include raw user/assistant text. It
+        is intentionally private to the Docker data volume and disabled by
+        default outside the local developer compose configuration.
+        """
+
+        if not config.empathic_debug_log:
+            return
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **payload,
+        }
+        with empathic_debug_lock:
+            empathic_debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with empathic_debug_path.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    def behavior_debug_payload(
+        *,
+        transport: str,
+        session_id: str,
+        turn_id: str,
+        avatar: AvatarOut,
+        renderer_method: str,
+        user_text: str,
+        assistant_text: str,
+        decision: BehaviorDecision,
+        conversation_elapsed_ms: int,
+    ) -> dict[str, object]:
+        return {
+            "transport": transport,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "avatar_id": avatar.id,
+            "renderer_method": renderer_method,
+            "conversation_elapsed_ms": conversation_elapsed_ms,
+            "user_text": user_text,
+            "assistant_text": assistant_text,
+            "behavior": decision.as_log_dict(),
+        }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -81,7 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health", response_model=HealthOut)
     async def health() -> HealthOut:
-        return HealthOut(status="ok", engine=renderer.mode, llm=conversation.name)
+        return HealthOut(status="ok", engine=renderer.mode, llm=conversation.name, empathic_debug_log=config.empathic_debug_log)
 
     @app.post("/api/telemetry/turn", status_code=204)
     async def record_turn_telemetry(body: TurnTelemetryIn) -> Response:
@@ -92,6 +145,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with telemetry_path.open("a", encoding="utf-8") as output:
                 output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         return Response(status_code=204)
+
+    @app.get("/api/debug/empathic-decisions")
+    async def read_empathic_debug_log(limit: int = 100) -> dict[str, object]:
+        """Read recent local expression diagnostics for development feedback."""
+
+        bounded_limit = max(1, min(limit, 500))
+        if not config.empathic_debug_log:
+            return {"enabled": False, "records": []}
+        if not empathic_debug_path.is_file():
+            return {"enabled": True, "records": []}
+        lines = empathic_debug_path.read_text(encoding="utf-8").splitlines()[-bounded_limit:]
+        return {"enabled": True, "records": [json.loads(line) for line in lines]}
+
+    @app.post("/api/debug/expression-feedback", status_code=201)
+    async def expression_feedback(body: ExpressionFeedbackIn):
+        if not config.empathic_debug_log:
+            raise HTTPException(403, "개발 진단 로그가 비활성화되어 있습니다.")
+        _session_or_404(store, body.session_id)
+        record = {"at": datetime.now(timezone.utc).isoformat(), **body.model_dump(mode="json")}
+        with telemetry_lock:
+            with (telemetry_path.parent / "expression-feedback.jsonl").open("a", encoding="utf-8") as output:
+                output.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"saved": True, "turn_id": body.turn_id}
+
+    @app.get("/api/debug/expression-turn/{turn_id}")
+    async def expression_turn_report(turn_id: str):
+        if not config.empathic_debug_log:
+            raise HTTPException(403, "개발 진단 로그가 비활성화되어 있습니다.")
+        if len(turn_id) > 128:
+            raise HTTPException(422, "Invalid turn id")
+        report = {"turn_id": turn_id, "media_included": False, "scan_limit_per_file": 10000}
+        for name in ("empathic-decisions", "ditto-affect-applied", "turn-events", "expression-feedback"):
+            path = telemetry_path.parent / (name + ".jsonl")
+            matches = []
+            if path.is_file():
+                with path.open(encoding="utf-8") as source:
+                    for line in deque(source, maxlen=10000):
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if record.get("turn_id") == turn_id:
+                            matches.append(record)
+            report[name] = matches
+        return report
 
     @app.get("/api/avatars", response_model=list[AvatarOut])
     async def list_avatars() -> list[AvatarOut]:
@@ -296,17 +394,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         selected_renderer = _renderer_for_method(session.renderer_method, renderer, realtime_renderer, trt10_renderer, fast_renderer)
         turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
-        conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id)
+        conversation_started_at = time.perf_counter()
+        conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override)
+        conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
-        visemes, renderer_out = await selected_renderer.render(
-            avatar,
+        decision = behavior_planner.from_affect(body.affect_override, source="manual_affect_override", expression_test=True) if body.affect_override else behavior_planner.resolve(
+            affect=conversation_response.affect,
+            requested=body.motion_plan,
+            motion_override=body.motion_override,
+        )
+        decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"expression_render_mode": body.expression_render_mode}))
+        debug_payload = behavior_debug_payload(
+            transport="rest",
             session_id=session_id,
             turn_id=turn_id,
-            text=conversation_response.text,
-            audio_path=conversation_response.audio_path,
-            audio_streaming=conversation_response.audio_streaming,
-            motion_plan=body.motion_plan,
+            avatar=avatar,
+            renderer_method=session.renderer_method,
+            user_text=body.text,
+            assistant_text=conversation_response.text,
+            decision=decision,
+            conversation_elapsed_ms=conversation_elapsed_ms,
+        )
+        record_empathic_debug("behavior.decision", debug_payload)
+        render_started_at = time.perf_counter()
+        try:
+            visemes, renderer_out = await selected_renderer.render(
+                avatar,
+                session_id=session_id,
+                turn_id=turn_id,
+                text=conversation_response.text,
+                audio_path=conversation_response.audio_path,
+                audio_streaming=conversation_response.audio_streaming,
+                motion_plan=decision.motion_plan,
+            )
+        except Exception as error:
+            record_empathic_debug(
+                "renderer.failed",
+                {**debug_payload, "renderer_elapsed_ms": round((time.perf_counter() - render_started_at) * 1_000), "error_type": type(error).__name__, "error": str(error)[:1_000]},
+            )
+            raise
+        record_empathic_debug(
+            "renderer.completed",
+            {**debug_payload, "renderer_elapsed_ms": round((time.perf_counter() - render_started_at) * 1_000), "renderer": renderer_out.model_dump(mode="json")},
         )
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
@@ -320,6 +450,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if caption is None:
             return {"text": None, "done": False}
         text, done = caption
+        if done and text and turn_id not in logged_caption_turns:
+            if len(logged_caption_turns) >= 1000:
+                logged_caption_turns.clear()
+            logged_caption_turns.add(turn_id)
+            record_empathic_debug("caption.final", {"session_id": session_id, "turn_id": turn_id, "assistant_text": text})
         return {"text": text, "done": done}
 
     @app.post("/api/live/sessions/{session_id}/interrupt")
@@ -371,7 +506,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not text:
                     continue
                 try:
-                    turn_body = TurnIn.model_validate({"text": text, "motion_plan": payload.get("motion_plan")})
+                    turn_body = TurnIn.model_validate({
+                        "text": text,
+                        "motion_plan": payload.get("motion_plan"),
+                        "motion_override": payload.get("motion_override", False),
+                        "affect_override": payload.get("affect_override"),
+                        "expression_render_mode": payload.get("expression_render_mode", "speech_safe"),
+                    })
                 except Exception as error:
                     await websocket.send_json({"type": "error", "detail": f"Invalid motion_plan: {error}"})
                     continue
@@ -380,18 +521,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 turn_id = str(uuid.uuid4())
                 store.set_active_turn(session_id, turn_id)
                 await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
-                answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id)
+                conversation_started_at = time.perf_counter()
+                answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=turn_body.affect_override)
+                conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
                 if not store.is_active_turn(session_id, turn_id):
                     await websocket.send_json({"type": "turn.cancelled", "turn_id": turn_id})
                     continue
-                visemes, render_out = await selected_renderer.render(
-                    avatar,
+                decision = behavior_planner.from_affect(turn_body.affect_override, source="manual_affect_override", expression_test=True) if turn_body.affect_override else behavior_planner.resolve(
+                    affect=answer.affect,
+                    requested=turn_body.motion_plan,
+                    motion_override=turn_body.motion_override,
+                )
+                decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"expression_render_mode": turn_body.expression_render_mode}))
+                debug_payload = behavior_debug_payload(
+                    transport="websocket",
                     session_id=session_id,
                     turn_id=turn_id,
-                    text=answer.text,
-                    audio_path=answer.audio_path,
-                    audio_streaming=answer.audio_streaming,
-                    motion_plan=turn_body.motion_plan,
+                    avatar=avatar,
+                    renderer_method=session.renderer_method,
+                    user_text=text,
+                    assistant_text=answer.text,
+                    decision=decision,
+                    conversation_elapsed_ms=conversation_elapsed_ms,
+                )
+                record_empathic_debug("behavior.decision", debug_payload)
+                render_started_at = time.perf_counter()
+                try:
+                    visemes, render_out = await selected_renderer.render(
+                        avatar,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        text=answer.text,
+                        audio_path=answer.audio_path,
+                        audio_streaming=answer.audio_streaming,
+                        motion_plan=decision.motion_plan,
+                    )
+                except Exception as error:
+                    record_empathic_debug(
+                        "renderer.failed",
+                        {**debug_payload, "renderer_elapsed_ms": round((time.perf_counter() - render_started_at) * 1_000), "error_type": type(error).__name__, "error": str(error)[:1_000]},
+                    )
+                    raise
+                record_empathic_debug(
+                    "renderer.completed",
+                    {**debug_payload, "renderer_elapsed_ms": round((time.perf_counter() - render_started_at) * 1_000), "renderer": render_out.model_dump(mode="json")},
                 )
                 store.set_active_turn(session_id, None)
                 await websocket.send_json({"type": "caption.final", "turn_id": turn_id, "text": answer.text})

@@ -1,0 +1,50 @@
+[
+  {
+    "emotion": "angry",
+    "turn_id": "native8-angry-1ef6bda0",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "disgust",
+    "turn_id": "native8-disgust-7c23cb81",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "fear",
+    "turn_id": "native8-fear-028ba48d",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "happy",
+    "turn_id": "native8-happy-17839ee1",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "neutral",
+    "turn_id": "native8-neutral-f5883564",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "sad",
+    "turn_id": "native8-sad-d50a92ee",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "surprise",
+    "turn_id": "native8-surprise-8b943f79",
+    "audio_packets": 110,
+    "video_frames": 134
+  },
+  {
+    "emotion": "contempt",
+    "turn_id": "native8-contempt-c71b2547",
+    "audio_packets": 110,
+    "video_frames": 134
+  }
+]

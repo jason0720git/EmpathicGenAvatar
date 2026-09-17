@@ -25,6 +25,9 @@ class Settings:
     fast_avatar_renderer_url: str | None = None
     realtime_avatar_renderer_url: str | None = None
     trt10_avatar_renderer_url: str | None = None
+    # Explicitly opt-in because this may contain conversation text for local
+    # expression-policy debugging. It is never enabled by application code.
+    empathic_debug_log: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,6 +53,9 @@ class Settings:
         api_access_token = os.getenv("API_ACCESS_TOKEN") or None
         if app_env == "production" and not api_access_token:
             raise ValueError("API_ACCESS_TOKEN is required when APP_ENV=production")
+        debug_value = os.getenv("EMPATHIC_DEBUG_LOG", "false").strip().lower()
+        if debug_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+            raise ValueError("EMPATHIC_DEBUG_LOG must be a boolean")
         return cls(
             data_dir=data_dir,
             database_path=database_path,
@@ -67,4 +73,5 @@ class Settings:
             fast_avatar_renderer_url=fast_renderer_url.rstrip("/") if fast_renderer_url else None,
             realtime_avatar_renderer_url=realtime_renderer_url.rstrip("/") if realtime_renderer_url else None,
             trt10_avatar_renderer_url=trt10_renderer_url.rstrip("/") if trt10_renderer_url else None,
+            empathic_debug_log=debug_value in {"1", "true", "yes", "on"},
         )

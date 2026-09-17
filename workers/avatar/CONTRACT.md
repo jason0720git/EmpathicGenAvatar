@@ -37,7 +37,7 @@ Input:
   "audio_path": "/data/tts/e1a9.wav",
   "text": "Optional caption only",
   "motion_plan": {
-    "expression": "warm",
+    "expression": "happy",
     "head": { "yaw_deg": 5, "pitch_deg": 0, "roll_deg": 0 },
     "gaze": { "x": 0.3, "y": 0 },
     "nod": { "start_ms": 300, "duration_ms": 460, "amplitude_deg": 5 }
@@ -53,11 +53,11 @@ Response from the Ditto streaming path:
   "stream_url": "/v1/assets/live/e1a9",
   "audio_url": "/v1/assets/audio/e1a9.wav",
   "visemes": [],
-  "applied_motion": { "expression": "warm", "head": { "yaw_deg": 5, "pitch_deg": 0, "roll_deg": 0 } }
+  "applied_motion": { "expression": "happy", "head": { "yaw_deg": 5, "pitch_deg": 0, "roll_deg": 0 } }
 }
 ```
 
-`motion_plan` is bounded at the control API. Ditto receives head pose and nod samples through `ctrl_info`; its documented coarse emotion condition receives `expression`. The current upstream public hook does **not** expose numeric independent pupil gaze, so `gaze` is only a small head-direction cue and must not be presented as eye tracking.
+`motion_plan` is bounded at the control API. Its semantic contract is `expression` (`angry`, `disgust`, `fear`, `happy`, `neutral`, `sad`, `surprise`, `contempt`) plus `intensity` (0–1). Ditto receives the matching coarse emotion sequence, a experimental source-informed `delta_exp` preset scaled by intensity, and bounded pose cues through `ctrl_info`. The dialogue model never sends facial-vector axes. The current upstream public hook does **not** expose numeric independent pupil gaze, so `gaze` is only a small head-direction cue and must not be presented as eye tracking.
 
 For the realtime implementation, audio is the clock: attach `sequence`, `start_ms`, and 320–640 ms PCM chunks to the request or WebSocket; the worker should return/publish matching 25 fps frames. Keep a 200 ms look-ahead, drop late frames, and reject any frame whose `(session_id, turn_id)` is stale. A barge-in calls `POST /v1/turns/cancel` and must flush TTS/video queues before the next turn.
 

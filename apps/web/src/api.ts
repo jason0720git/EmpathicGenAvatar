@@ -1,4 +1,4 @@
-import type { Avatar, LiveSession, MotionPlan, RendererMethod, TurnResponse } from './types'
+import type { AffectIntent, Avatar, LiveSession, MotionPlan, RendererMethod, TurnResponse } from './types'
 
 const base = import.meta.env.VITE_API_BASE_URL ?? ''
 const accessToken = import.meta.env.VITE_API_ACCESS_TOKEN
@@ -56,11 +56,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction }),
     }),
-  sendTurn: (sessionId: string, text: string, motionPlan?: MotionPlan, clientTurnId?: string) =>
-    request<TurnResponse>(`/api/live/sessions/${sessionId}/turns`, {
+  sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe') => {
+    // Auto intentionally omits affect_override, so only that path invokes
+    // the Realtime affect tool. Manual evaluation sends two bounded fields.
+    const body = {
+      text,
+      client_turn_id: clientTurnId,
+      ...(expressionRenderMode ? { expression_render_mode: expressionRenderMode } : {}),
+      ...(affectOverride ? { affect_override: affectOverride } : {}),
+    }
+    return request<TurnResponse>(`/api/live/sessions/${sessionId}/turns`, {
       method: 'POST',
-      body: JSON.stringify({ text, motion_plan: motionPlan, client_turn_id: clientTurnId }),
-    }),
+      body: JSON.stringify(body),
+    })
+  },
   turnCaption: (sessionId: string, turnId: string) =>
     request<{ text: string | null; done: boolean }>(`/api/live/sessions/${sessionId}/turns/${turnId}/caption`),
   interrupt: (sessionId: string) =>
@@ -69,4 +78,7 @@ export const api = {
     request<void>(`/api/live/sessions/${sessionId}`, { method: 'DELETE' }),
   telemetry: (payload: { turn_id: string; event: string; elapsed_ms: number; details?: Record<string, number | string | boolean> }) =>
     request<void>('/api/telemetry/turn', { method: 'POST', body: JSON.stringify(payload) }).catch(() => undefined),
+  expressionFeedback: (payload: {session_id: string; turn_id: string; issue: string; severity: number; at_ms?: number; note: string}) =>
+    request<{saved: boolean; turn_id: string}>('/api/debug/expression-feedback', {method: 'POST', body: JSON.stringify(payload)}),
+  expressionReport: (turnId: string) => request<Record<string, unknown>>(`/api/debug/expression-turn/${encodeURIComponent(turnId)}`),
 }

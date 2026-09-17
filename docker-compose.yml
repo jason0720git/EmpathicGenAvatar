@@ -20,6 +20,9 @@ services:
       CONVERSATION_BACKEND: ${CONVERSATION_BACKEND:-demo}
       OLLAMA_URL: ${OLLAMA_URL:-}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      # Local developer diagnostics only. This records raw turn text and the
+      # expression decision under the private Docker volume; set false to stop.
+      EMPATHIC_DEBUG_LOG: ${EMPATHIC_DEBUG_LOG:-true}
     ports:
       - "8000:8000"
     volumes:

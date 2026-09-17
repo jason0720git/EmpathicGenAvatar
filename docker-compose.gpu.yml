@@ -101,6 +101,8 @@ services:
   # TensorRT 10 Ditto Realtime is isolated from the PyTorch baseline. It is
   # started with the normal stack and selected only from the start-mode UI.
   avatar-worker-trt10:
+    # Recover native crashes; bounded retries prevent an endless crash loop.
+    restart: on-failure:3
     build:
       context: ./workers/avatar
       args:
@@ -116,6 +118,7 @@ services:
       # Registers our GridSample3D V2 ONNX-parser plugin before Ditto's TRT
       # wrappers deserialize warp_network_fp16.engine.
       LD_PRELOAD: /worker/trt_plugins/libditto_gridsample3d_trt10.so
+      PYTHONFAULTHANDLER: "1"
       WORKER_SHARED_TOKEN: ${WORKER_SHARED_TOKEN:-}
     volumes:
       - avatar-data:/data

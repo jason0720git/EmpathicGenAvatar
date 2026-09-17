@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -72,31 +73,175 @@ class NodIntent(BaseModel):
 
 
 class MotionPlan(BaseModel):
-    """The worker-side subset of behavior.v0.1 used by the Ditto adapter."""
+    """The worker-side bounded affect plan used by the Ditto adapter."""
 
-    expression: Literal["neutral", "warm", "concern"] = "neutral"
+    expression: Literal["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise", "contempt"] = "neutral"
+    intensity: float = Field(default=0.35, ge=0, le=1)
+    expression_test: bool = False
+    expression_render_mode: Literal["off", "native", "legacy", "speech_safe"] = "speech_safe"
     head: HeadPose = Field(default_factory=HeadPose)
     gaze: GazeIntent = Field(default_factory=GazeIntent)
     nod: NodIntent | None = None
 
 
-# Ditto's upstream ConditionHandler labels: Angry, Disgust, Fear, Happy,
-# Neutral, Sad, Surprise, Contempt. These are deliberately coarse v0.1
-# choices; arbitrary delta_exp vectors stay internal until calibrated.
-DITTO_EMOTION_INDEX = {"warm": 3, "neutral": 4, "concern": 5}
+# Native Ditto order, shared by the UI and affect function schema.
+DITTO_EMOTION_INDEX = {name: index for index, name in enumerate(
+    ("angry", "disgust", "fear", "happy", "neutral", "sad", "surprise", "contempt")
+)}
+PRESET_VERSION = "native8-speech-protected-v5-smile"
+# Based on vendor/LivePortrait/src/gradio_pipeline.py's smile, eyebrow and
+# lip-variation controls. Ditto uses 21 implicit 3D keypoints, flattened to 63.
+# Keep pupil controls untouched. Only calibrated positive y offsets at 13/16
+# widen lids; the adapter below attenuates those offsets during native blinks.
+PROTECTED_EYE_POINTS = (11, 15, 18)
+LID_CONTROL_POINTS = (13, 16)
+SPEECH_LIP_POINTS = (6, 12, 14, 17, 19, 20)
+SPEECH_CENTER_POINTS = (6, 12, 17, 19)
+SMILE_CORNER_POINTS = (14, 20)
+SMILE_CORNER_MAX_DELTA = 0.010
+# Accepted v2 presets (smile, eyebrow). Retuned states use independent sparse
+# combinations below rather than variations of the same eyebrow scalar.
+FACIAL_PRESETS = {
+    "angry": (-0.20, -12.0),
+    "disgust": (0.0, -19.0),
+    "happy": (1.0, 0.0),
+    "neutral": (0.0, 0.0),
+}
+# FACS-inspired targets, empirically measured implicit coordinates, not AUs.
+# See docs/native8-expression-presets.md and calibrate_affect.py.
+FACIAL_COMPONENTS = {
+    "fear": {(1, 0): .020, (2, 0): -.020, (1, 1): .010, (2, 1): -.010,
+             (13, 1): .005, (16, 1): .002, (14, 1): .006, (20, 2): .007},
+    "sad": {(1, 0): .012, (2, 0): -.012, (1, 1): .016, (2, 1): -.009,
+            (14, 1): .022, (20, 1): .004, (3, 1): .003, (7, 1): .003},
+    "surprise": {(1, 1): .009, (2, 1): -.009, (13, 1): .010, (16, 1): .006},
+    "contempt": {(20, 0): .024, (20, 2): .008, (14, 1): -.003,
+                 (3, 1): .009, (7, 1): -.014},
+}
+
+
+def facial_template(name: str) -> np.ndarray:
+    d = np.zeros((21, 3), dtype=np.float32)
+    if name in FACIAL_COMPONENTS:
+        for (point, axis), value in FACIAL_COMPONENTS[name].items():
+            d[point, axis] = value
+        return d.reshape(1, 63)
+    smile, brow = FACIAL_PRESETS[name]
+    for point, value in ((20, -0.01), (14, -0.02), (17, 0.0065),
+                         (3, -0.0035), (7, -0.0035)):
+        d[point, 1] += smile * value
+    d[17, 2] += smile * 0.003
+    if brow > 0:
+        d[1, 1] += brow * 0.001
+        d[2, 1] -= brow * 0.001
+    else:
+        d[1, 0] -= brow * 0.001
+        d[2, 0] += brow * 0.001
+        d[1, 1] += brow * 0.0003
+        d[2, 1] -= brow * 0.0003
+    if name == "disgust":
+        # Unequal brow contraction and a small asymmetric corner downturn.
+        d[1] *= 0.6
+        d[14, 1] = 0.004
+        d[20, 1] = 0.008
+    # Keep the accepted Happy/Angry presets, but do not impose lip-center
+    # offsets in the retuned states.
+    if name not in {"happy", "angry"}:
+        d[[6, 12, 17, 19]] = 0
+    d[list(PROTECTED_EYE_POINTS)] = 0
+    return d.reshape(1, 63)
+
+
+DITTO_AFFECT_DELTA_EXP = {name: facial_template(name) for name in DITTO_EMOTION_INDEX}
+
+
+def affect_residual_gain(plan: MotionPlan) -> float:
+    return 1.0 if plan.expression_test else (0.65 if plan.expression in FACIAL_COMPONENTS else 0.35)
+
+
+class BlinkAwareMotionStitch:
+    """Keep the bounded lid-opening residual from opposing native blinks.
+
+    Wrap the upstream component without mutating vendor files or its cached
+    frame controls. Unknown/no-blink schedules leave the residual unchanged.
+    """
+    def __init__(self, inner):
+        self.inner = inner
+        self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
+
+    def setup(self, *args, **kwargs):
+        self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
+        return self.inner.setup(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def __call__(self, x_s_info, x_d_info, **kwargs):
+        protect = kwargs.pop("preserve_speech_lips", False)
+        smile_corners = kwargs.pop("allow_smile_corners", False)
+        baseline = None
+        if protect:
+            # Two tiny stitching passes, NOT two Audio2Motion/decoder passes.
+            # Replay the same state so relative motion, fade and blink advance
+            # exactly once. Preserve the audio-only final lip keypoints.
+            keys = ("idx", "d0", "fade_dst", "pose_s", "x_s", "scale_ratio", "use_d_keys")
+            saved = {k: copy.deepcopy(getattr(self.inner, k)) for k in keys if hasattr(self.inner, k)}
+            base_kwargs = {k: v for k, v in kwargs.items() if k != "delta_exp"}
+            try:
+                _, baseline = self.inner(x_s_info, copy.deepcopy(x_d_info), **base_kwargs)
+                baseline = baseline.copy()
+            finally:
+                for key, value in saved.items():
+                    setattr(self.inner, key, value)
+        delta = kwargs.get("delta_exp")
+        blink = getattr(self.inner, "delta_eye_arr", None)
+        schedule = getattr(self.inner, "delta_eye_idx_list", None)
+        if (delta is not None and np.any(delta.reshape(21, 3)[list(LID_CONTROL_POINTS), 1])
+                and blink is not None and schedule is not None and len(schedule)
+                and getattr(self.inner, "drive_eye", False)):
+            norms = np.linalg.norm(np.asarray(blink).reshape(len(blink), -1), axis=1)
+            peak = float(np.max(norms))
+            if peak > 0:
+                index = schedule[self.inner.idx % len(schedule)]
+                weight = float(np.clip(1 - norms[index] / peak, 0, 1))
+                adjusted = delta.copy().reshape(21, 3)
+                adjusted[list(LID_CONTROL_POINTS), 1] *= weight
+                kwargs["delta_exp"] = adjusted.reshape(1, 63)
+        result = self.inner(x_s_info, x_d_info, **kwargs)
+        if baseline is not None:
+            source, driving = result
+            driving = driving.copy()
+            removed = float(np.max(np.abs(driving[:, SPEECH_LIP_POINTS] - baseline[:, SPEECH_LIP_POINTS])))
+            protected = SPEECH_CENTER_POINTS if smile_corners else SPEECH_LIP_POINTS
+            driving[:, protected] = baseline[:, protected]
+            if smile_corners:
+                # Bound the final displacement, including stitch coupling and
+                # pose rotation. Never add a lip-center/jaw-opening residual.
+                offsets = driving[:, SMILE_CORNER_POINTS] - baseline[:, SMILE_CORNER_POINTS]
+                lengths = np.linalg.norm(offsets, axis=-1, keepdims=True)
+                offsets *= np.minimum(1.0, SMILE_CORNER_MAX_DELTA / np.maximum(lengths, 1e-8))
+                driving[:, SMILE_CORNER_POINTS] = baseline[:, SMILE_CORNER_POINTS] + offsets
+                self.protection_stats["smile_corner_frames"] = self.protection_stats.get("smile_corner_frames", 0) + 1
+                self.protection_stats["peak_corner_delta"] = max(self.protection_stats.get("peak_corner_delta", 0.0), float(np.max(np.linalg.norm(offsets, axis=-1))))
+            self.protection_stats["frames"] += 1
+            self.protection_stats["peak_removed_lip_delta"] = max(self.protection_stats["peak_removed_lip_delta"], removed)
+            return source, driving
+        return result
 # StreamSDK prepends three 40 ms chunks for its causal frontend and its
 # Audio2Motion overlap adds another ten frames.  Those 13 frames are context,
 # not part of the caller's WAV timeline, and must never be presented at PTS 0.
 DITTO_CHUNKSIZE = (3, 5, 2)
 DITTO_PREROLL_FRAMES = 13
-IDLE_ASSET_VERSION = 3
+# Increment whenever the generated idle media semantics change, so existing
+# cached loops cannot mask a behavior fix in a browser session.
+IDLE_ASSET_VERSION = 4
 # Real talking turns reserve a small silent motion bridge at each edge. The
 # browser receives these frames, but never receives silent PCM for the lead.
 DITTO_TURN_LEAD_FRAMES = 12
 DITTO_TURN_TAIL_FRAMES = 12
 
 
-def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0) -> dict[int, dict[str, float]]:
+def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0) -> dict[int, dict[str, float | np.ndarray]]:
     """Convert safe turn-level controls into Ditto's documented frame controls.
 
     Ditto accepts pose offsets in degrees. Its public online API does not expose
@@ -111,7 +256,38 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
         "delta_roll": plan.head.roll_deg,
     }
     total_frames = frame_count + frame_offset
-    controls: dict[int, dict[str, float]] = {frame: dict(base) for frame in range(total_frames)}
+    controls: dict[int, dict[str, float | np.ndarray]] = {frame: dict(base) for frame in range(total_frames)}
+    template = DITTO_AFFECT_DELTA_EXP[plan.expression].copy()
+    if plan.expression_render_mode in {"off", "native"}:
+        template[:] = 0
+    elif plan.expression_render_mode == "speech_safe":
+        template.reshape(21, 3)[list(SPEECH_LIP_POINTS)] = 0
+        if plan.expression == "happy":
+            # Recover a bounded smile without the legacy point-17 aperture
+            # and depth changes that compete with consonant closure.
+            points = template.reshape(21, 3)
+            points[14, 1] = -0.014
+            points[20, 1] = -0.008
+            points[[3, 7], 1] = -0.005
+        for control in controls.values():
+            control["preserve_speech_lips"] = True
+            if plan.expression == "happy" and plan.intensity > 0:
+                control["allow_smile_corners"] = True
+    if plan.intensity > 0 and np.any(template):
+        residual_gain = affect_residual_gain(plan)
+        attack_frames = max(4, round(0.16 * fps))
+        release_frames = max(6, round(0.22 * fps))
+        for frame in range(frame_offset, total_frames):
+            visible_frame = frame - frame_offset
+            attack = min(1.0, (visible_frame + 1) / attack_frames)
+            release = min(1.0, (total_frames - frame) / release_frames)
+            residual = template * (residual_gain * plan.intensity * min(attack, release))
+            if plan.expression == "surprise":
+                # A reaction peaks early and settles to a raised-brow tone;
+                # it never creates a held-open jaw or repeats every sentence.
+                seconds = visible_frame / fps
+                residual *= 0.85 + 0.15 * np.exp(-max(0.0, seconds - 0.5) / 0.7)
+            controls[frame]["delta_exp"] = residual
     if plan.nod is None:
         return controls
 
@@ -125,6 +301,57 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
         envelope = float(np.sin(np.pi * phase))
         controls[frame]["delta_pitch"] = base["delta_pitch"] + plan.nod.amplitude_deg * envelope
     return controls
+
+
+def build_ditto_emotion_condition(plan: MotionPlan, frame_count: int) -> np.ndarray:
+    """Blend neutral and one named Ditto condition by affect intensity.
+
+    Passing a frame sequence uses Ditto's documented ``emo`` ndarray path.
+    This makes intensity meaningful for its coarse emotion conditioning as
+    well as for the private ``delta_exp`` residual preset.
+    """
+
+    neutral = np.zeros(8, dtype=np.float32)
+    neutral[4] = 8
+    target = np.zeros(8, dtype=np.float32)
+    # Fear/Surprise native conditioning can impose a smiling/open-jaw bias
+    # even when our lip residual is zero. Use neutral audio motion for those
+    # speaking states; the distinct brow residual still expresses the affect.
+    motion_expression = plan.expression
+    if plan.expression_render_mode in {"off", "speech_safe"} or (plan.expression_render_mode == "legacy" and plan.expression in {"fear", "surprise"}):
+        motion_expression = "neutral"
+    target[DITTO_EMOTION_INDEX[motion_expression]] = 8
+    # Match upstream ConditionHandler's stable softmax label vectors, then
+    # interpolate in probability space so intensity=0 is truly neutral.
+    neutral = np.exp(neutral - neutral.max())
+    neutral /= neutral.sum()
+    target = np.exp(target - target.max())
+    target /= target.sum()
+    condition_intensity = plan.intensity
+    if plan.expression_test and plan.expression != "neutral" and plan.intensity > 0:
+        # The 25% and 50% manual buttons must still be visually diagnostic.
+        condition_intensity = min(1.0, 0.35 + 0.65 * plan.intensity)
+    blend = neutral * (1 - condition_intensity) + target * condition_intensity
+    return np.repeat(blend.reshape(1, 8), max(1, frame_count), axis=0)
+
+
+def record_ditto_affect_diagnostic(data_root: Path, payload: dict[str, object]) -> None:
+    """Append a content-free record of the exact affect sent to Ditto.
+
+    The control-plane decision log proves what was requested.  This companion
+    worker log proves the tensor and frame controls that reached the Ditto SDK,
+    without retaining dialogue text or audio.
+    """
+
+    try:
+        destination = data_root / "telemetry" / "ditto-affect-applied.jsonl"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"at": time.time(), **payload}, ensure_ascii=False, separators=(",", ":"))
+        with destination.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except OSError as error:
+        # Diagnostics must never make the speech/video path unavailable.
+        print(f"Ditto affect diagnostic write failed: {error}", flush=True)
 
 
 def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, float]]:
@@ -157,6 +384,23 @@ def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, 
             "delta_roll": float(roll),
         }
     return controls
+
+
+def idle_blink_open_frames(variant: int) -> list[int]:
+    """Return repeatable natural blink gaps for an eight-second idle loop.
+
+    Ditto's upstream motion stitcher owns the eyelid expression sequence from
+    its calibrated ``delta_eye_arr``.  These values only control the number
+    of 25-fps open-eye frames between its 15-frame blink clips.  Two blinks
+    per loop avoids the statue effect while keeping loop boundaries open.
+    """
+
+    patterns = (
+        [58, 78],  # blink near 2.3 s and 6.0 s
+        [68, 66],  # blink near 2.7 s and 6.0 s
+        [76, 58],  # blink near 3.0 s and 5.9 s
+    )
+    return patterns[variant % len(patterns)]
 
 
 class CancelIn(BaseModel):
@@ -447,6 +691,7 @@ class DittoLiveRuntime:
             sys.path.insert(0, str(self.config.ditto_root))
             from stream_pipeline_online import StreamSDK
             self.sdk = StreamSDK(str(self.config.config_path), str(self.config.model_root))
+            self.sdk.motion_stitch = BlinkAwareMotionStitch(self.sdk.motion_stitch)
         return self.sdk
 
     def _register_avatar(self, avatar_id: str, source: Path) -> None:
@@ -510,7 +755,7 @@ class DittoLiveRuntime:
         sdk.setup(
             "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
             sampling_timesteps=self.config.sampling_timesteps,
-            emo=DITTO_EMOTION_INDEX[warm_plan.expression], ctrl_info=ctrl_info,
+            emo=build_ditto_emotion_condition(warm_plan, warm_frames + DITTO_PREROLL_FRAMES), ctrl_info=ctrl_info,
         )
         try:
             sdk.setup_Nd(warm_frames, ctrl_info=ctrl_info)
@@ -569,6 +814,7 @@ class DittoLiveRuntime:
         frame_count = 200  # eight seconds at the shared 25-fps media clock
         sink = IdleJpegFrameSink(output, expected_frames=frame_count, skip_initial_frames=DITTO_PREROLL_FRAMES)
         ctrl_info = build_idle_ctrl_info(variant, frame_count + DITTO_PREROLL_FRAMES)
+        blink_open_frames = idle_blink_open_frames(variant)
         # An exact all-zero waveform is discarded by Ditto's streaming HuBERT
         # frontend and never reaches the motion pipeline. A very-low-energy,
         # deterministic breath signal keeps the model clock running without
@@ -584,8 +830,9 @@ class DittoLiveRuntime:
         try:
             sdk.setup(
                 "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
-                sampling_timesteps=self.config.sampling_timesteps,
-                emo=DITTO_EMOTION_INDEX["neutral"], ctrl_info=ctrl_info,
+                sampling_timesteps=self.config.sampling_timesteps, drive_eye=True,
+                delta_eye_open_n=blink_open_frames,
+                emo=build_ditto_emotion_condition(MotionPlan(expression="neutral", intensity=0), frame_count + DITTO_PREROLL_FRAMES), ctrl_info=ctrl_info,
             )
             sdk.setup_Nd(frame_count, ctrl_info=ctrl_info)
             chunksize = DITTO_CHUNKSIZE
@@ -607,6 +854,8 @@ class DittoLiveRuntime:
                     "avatar_id": avatar_id,
                     "variant": variant,
                     "frames": sink.frame_count,
+                    "blink_open_frames": blink_open_frames,
+                    "blink_count": len(blink_open_frames),
                     "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
                 },
                 ensure_ascii=False,
@@ -754,7 +1003,7 @@ class DittoLiveRuntime:
         sdk.setup(
             "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
             sampling_timesteps=self.config.sampling_timesteps,
-            emo=DITTO_EMOTION_INDEX[motion_plan.expression],
+            emo=build_ditto_emotion_condition(motion_plan, frame_count + DITTO_PREROLL_FRAMES),
             ctrl_info=ctrl_info,
         )
         # `setup_Nd` is the requested speech length. StreamSDK itself emits
@@ -1036,6 +1285,15 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         return f"/avatar-stream/v1/live/{body.turn_id}", None
 
     async def _run_realtime(
+        self, body, turn, timeline, metrics, audio_dir,
+    ) -> None:
+        # One SDK owns mutable TensorRT contexts. Keep the same lock used by
+        # prepare/idle until the native thread has really exited, including
+        # cancellation: cancelling to_thread does NOT stop the native work.
+        async with self.lock:
+            await self._run_realtime_exclusive(body, turn, timeline, metrics, audio_dir)
+
+    async def _run_realtime_exclusive(
         self,
         body: RenderIn,
         turn: LiveTurn,
@@ -1087,7 +1345,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
                         pcm_input.put(None)
                         break
                     await asyncio.sleep(0.012)
-                await render_task
+                await asyncio.shield(render_task)
                 with contextlib.suppress(FileNotFoundError):
                     external.unlink()
                 with contextlib.suppress(FileNotFoundError):
@@ -1133,14 +1391,17 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
                 pcm_input.put(pcm)
                 pcm_input.put(np.zeros((DITTO_TURN_TAIL_FRAMES * 640,), dtype=np.int16))
                 pcm_input.put(None)
-                await render_task
+                await asyncio.shield(render_task)
             # Allow thread-safe frame callbacks to enter the asyncio queue
             # before publishing end-of-turn to the browser.
             await asyncio.sleep(0)
-        except Exception:
+        except BaseException:
             pcm_input.put(None)
             if render_task is not None:
-                render_task.cancel()
+                # Drain before releasing SDK ownership; a new turn must not
+                # call setup/close on contexts still used by the old thread.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(render_task)
             raise
         finally:
             timeline.finish()
@@ -1200,6 +1461,58 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         target_frames = 750 if body.audio_streaming else timeline.frame_count()
         motion_plan = body.motion_plan or MotionPlan()
         ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames)
+        emotion_condition = build_ditto_emotion_condition(motion_plan, target_frames + preroll_frames)
+        delta_norms = [
+            float(np.linalg.norm(control["delta_exp"]))
+            for control in ctrl_info.values()
+            if "delta_exp" in control
+        ]
+        peak_control = max(
+            (c["delta_exp"] for c in ctrl_info.values() if "delta_exp" in c),
+            key=lambda value: float(np.linalg.norm(value)),
+            default=np.zeros((1, 63), dtype=np.float32),
+        ).reshape(21, 3)
+        affect_diagnostic = {
+            "event": "ditto.affect_applied",
+            "turn_id": body.turn_id,
+            "avatar_id": body.avatar_id,
+            "expression": motion_plan.expression,
+            "intensity": motion_plan.intensity,
+            "expression_test": motion_plan.expression_test,
+            "expression_render_mode": motion_plan.expression_render_mode,
+            "audio_streaming": body.audio_streaming,
+            "target_frames": target_frames,
+            "emotion_condition": {
+                "shape": list(emotion_condition.shape),
+                "weights": [round(float(value), 6) for value in emotion_condition[0]],
+                "dominant_index": int(np.argmax(emotion_condition[0])),
+            },
+            "delta_exp": {
+                "shape": [1, 63],
+                "policy": PRESET_VERSION,
+                "protected_eye_points": list(PROTECTED_EYE_POINTS),
+                "blink_aware_lid_points": list(LID_CONTROL_POINTS),
+                "component_semantics": "nonzero_components is the raw preset, before mode masking; applied_peak_components is the actual pre-stitch control",
+                "applied_peak_components": [
+                    {"point": int(p), "axis": int(a), "offset": float(peak_control[p, a])}
+                    for p, a in np.argwhere(peak_control != 0)
+                ],
+                "nonzero_components": [
+                    {"point": int(p), "axis": int(a), "offset_at_full_manual_intensity": float(DITTO_AFFECT_DELTA_EXP[motion_plan.expression].reshape(21, 3)[p, a])}
+                    for p, a in np.argwhere(DITTO_AFFECT_DELTA_EXP[motion_plan.expression].reshape(21, 3) != 0)
+                ],
+                "residual_gain": affect_residual_gain(motion_plan),
+                "controlled_frames": len(delta_norms),
+                "first_norm": round(delta_norms[0], 8) if delta_norms else 0.0,
+                "peak_norm": round(max(delta_norms), 8) if delta_norms else 0.0,
+                "last_norm": round(delta_norms[-1], 8) if delta_norms else 0.0,
+            },
+            "head_deg": motion_plan.head.model_dump(mode="json"),
+            "gaze": motion_plan.gaze.model_dump(mode="json"),
+            "nod": motion_plan.nod.model_dump(mode="json") if motion_plan.nod else None,
+        }
+        record_ditto_affect_diagnostic(self.config.data_root, affect_diagnostic)
+        print("Ditto affect applied: " + json.dumps(affect_diagnostic, ensure_ascii=False, sort_keys=True), flush=True)
         sink = MjpegFrameSink(
             loop,
             turn.frames,
@@ -1213,7 +1526,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         sdk.setup(
             "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
             sampling_timesteps=sampling_timesteps,
-            emo=DITTO_EMOTION_INDEX[motion_plan.expression], ctrl_info=ctrl_info,
+            emo=emotion_condition, ctrl_info=ctrl_info,
         )
         if profile_enabled:
             profile_events.append(("turn_setup", setup_started_at, time.monotonic()))
@@ -1263,6 +1576,13 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             sink.close()
             if sink.first_frame_at is not None:
                 metrics.mark("first_frame_ready", sink.first_frame_at)
+            record_ditto_affect_diagnostic(self.config.data_root, {
+                "event": "ditto.speech_protection", "turn_id": body.turn_id,
+                "policy": PRESET_VERSION, "mode": motion_plan.expression_render_mode,
+                "protected_points": list(SPEECH_CENTER_POINTS if motion_plan.expression == "happy" and motion_plan.intensity > 0 else SPEECH_LIP_POINTS) if motion_plan.expression_render_mode == "speech_safe" else [],
+                "smile_corner_max_delta": SMILE_CORNER_MAX_DELTA if motion_plan.expression == "happy" and motion_plan.expression_render_mode == "speech_safe" else 0,
+                **getattr(sdk.motion_stitch, "protection_stats", {}),
+            })
             if profile_enabled:
                 self._write_pipeline_profile(body.turn_id, profile_started_at, profile_events, sink.first_frame_at)
             print(

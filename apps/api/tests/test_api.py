@@ -16,11 +16,41 @@ def image_payload() -> bytes:
     return output.getvalue()
 
 
-def client_for(tmp_path):
+def test_expression_feedback_and_correlated_report(tmp_path):
+    with client_for(tmp_path, empathic_debug_log=True) as client:
+        avatar = create_avatar(client)
+        session = client.post('/api/live/sessions', json={'avatar_id': avatar['id']}).json()
+        for mode in ('off', 'native', 'legacy', 'speech_safe'):
+            turn_id = 'feedback-test-' + mode
+            response = client.post(f"/api/live/sessions/{session['id']}/turns", json={
+                'text':'hello', 'client_turn_id':turn_id, 'expression_render_mode':mode,
+                'affect_override':{'emotion':'happy','intensity':1}})
+            assert response.status_code == 200, response.text
+            assert response.json()['renderer']['applied_motion']['expression_render_mode'] == mode
+            payload = {'session_id':session['id'], 'turn_id':turn_id, 'issue':'mouth_blur', 'severity':2, 'at_ms':1200, 'note':'synthetic test'}
+            assert client.post('/api/debug/expression-feedback',json=payload).status_code == 201
+            report = client.get('/api/debug/expression-turn/' + turn_id).json()
+            assert len(report['expression-feedback']) == 1
+            assert report['expression-feedback'][0]['note'] == 'synthetic test'
+            assert report['empathic-decisions']
+            assert report['media_included'] is False
+        assert client.post('/api/debug/expression-feedback',json={**payload,'severity':4}).status_code == 422
+        assert client.post('/api/debug/expression-feedback',json={**payload,'note':'x'*1001}).status_code == 422
+        assert client.post(f"/api/live/sessions/{session['id']}/turns",json={'text':'test','expression_render_mode':'invalid'}).status_code == 422
+
+
+def test_expression_debug_is_disabled_by_default(tmp_path):
+    with client_for(tmp_path) as client:
+        assert client.get('/api/debug/expression-turn/test').status_code == 403
+        assert client.post('/api/debug/expression-feedback',json={'session_id':'test','turn_id':'test','issue':'good'}).status_code == 403
+
+
+def client_for(tmp_path, *, empathic_debug_log: bool = False):
     settings = Settings(
         data_dir=tmp_path / "data",
         database_path=tmp_path / "data" / "test.db",
         allowed_origins=("http://testserver",),
+        empathic_debug_log=empathic_debug_log,
     )
     return TestClient(create_app(settings))
 
@@ -108,17 +138,141 @@ def test_turn_accepts_bounded_motion_plan(tmp_path):
             json={
                 "text": "고개를 끄덕이며 답해 주세요.",
                 "motion_plan": {
-                    "expression": "concern",
+                    "expression": "sad",
+                    "intensity": 0.5,
                     "head": {"yaw_deg": 3, "pitch_deg": 0, "roll_deg": 0},
                     "gaze": {"x": 0, "y": 0},
                     "nod": {"start_ms": 300, "duration_ms": 460, "amplitude_deg": 5},
                 },
+                "motion_override": True,
             },
         )
         assert response.status_code == 200, response.text
         applied = response.json()["renderer"]["applied_motion"]
-        assert applied["expression"] == "concern"
+        assert applied["expression"] == "sad"
         assert applied["nod"]["amplitude_deg"] == 5
+
+
+def test_demo_backend_uses_declared_neutral_fallback_without_text_classification(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+
+        serious = client.post(
+            f"/api/live/sessions/{session['id']}/turns",
+            json={"text": "요즘 너무 불안하고 힘들어요."},
+        )
+        assert serious.status_code == 200, serious.text
+        assert serious.json()["renderer"]["applied_motion"]["expression"] == "neutral"
+
+        override = client.post(
+            f"/api/live/sessions/{session['id']}/turns",
+            json={
+                "text": "요즘 너무 불안하고 힘들어요.",
+                "motion_plan": {
+                    "expression": "sad",
+                    "intensity": 0.5,
+                    "head": {"yaw_deg": 0, "pitch_deg": 0, "roll_deg": 0},
+                    "gaze": {"x": 0, "y": 0},
+                },
+                "motion_override": True,
+            },
+        )
+        assert override.status_code == 200, override.text
+        assert override.json()["renderer"]["applied_motion"]["expression"] == "sad"
+
+
+def test_manual_affect_override_applies_without_a_motion_plan(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+        response = client.post(
+            f"/api/live/sessions/{session['id']}/turns",
+            json={"text": "일반 답변도 표정 테스트로 렌더링합니다.", "affect_override": {"emotion": "surprise", "intensity": 0.75}},
+        )
+
+        assert response.status_code == 200, response.text
+        applied = response.json()["renderer"]["applied_motion"]
+        assert applied["expression"] == "surprise"
+        assert applied["intensity"] == 0.75
+
+
+def test_opt_in_empathic_debug_log_records_decision_evidence(tmp_path):
+    with client_for(tmp_path, empathic_debug_log=True) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+        response = client.post(
+            f"/api/live/sessions/{session['id']}/turns",
+            json={
+                "text": "어제 너무 슬펐어요.", "client_turn_id": "sadness-turn",
+                "motion_plan": {"expression": "sad", "intensity": 0.5}, "motion_override": True,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        applied_motion = response.json()["renderer"]["applied_motion"]
+        assert applied_motion["expression"] == "sad"
+        assert applied_motion["intensity"] == 0.5
+        debug = client.get("/api/debug/empathic-decisions?limit=10")
+        assert debug.status_code == 200
+        records = debug.json()["records"]
+        decision = next(record for record in records if record["event"] == "behavior.decision")
+        rendered = next(record for record in records if record["event"] == "renderer.completed")
+        assert decision["turn_id"] == "sadness-turn"
+        assert decision["user_text"] == "어제 너무 슬펐어요."
+        assert decision["behavior"]["motion_plan"]["expression"] == "sad"
+        assert decision["behavior"]["motion_plan"]["intensity"] == 0.5
+        assert decision["behavior"]["source"] == "manual_override"
+        assert rendered["renderer"]["applied_motion"]["expression"] == "sad"
+
+
+def test_websocket_demo_turn_uses_the_same_neutral_fallback(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+        with client.websocket_connect(f"/ws/live/{session['id']}") as websocket:
+            assert websocket.receive_json()["type"] == "room.state"
+            websocket.send_json({"type": "turn", "text": "안녕하세요"})
+            assert websocket.receive_json()["type"] == "turn.started"
+            assert websocket.receive_json()["type"] == "caption.final"
+            renderer = websocket.receive_json()
+            assert renderer["type"] == "renderer"
+            assert renderer["renderer"]["applied_motion"]["expression"] == "neutral"
+
+
+def test_websocket_explicit_neutral_override_has_rest_parity(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+        with client.websocket_connect(f"/ws/live/{session['id']}") as websocket:
+            assert websocket.receive_json()["type"] == "room.state"
+            websocket.send_json({
+                "type": "turn",
+                "text": "요즘 너무 불안하고 힘들어요.",
+                "motion_plan": {
+                    "expression": "neutral",
+                    "head": {"yaw_deg": 0, "pitch_deg": 0, "roll_deg": 0},
+                    "gaze": {"x": 0, "y": 0},
+                },
+                "motion_override": True,
+            })
+            assert websocket.receive_json()["type"] == "turn.started"
+            assert websocket.receive_json()["type"] == "caption.final"
+            renderer = websocket.receive_json()
+            assert renderer["renderer"]["applied_motion"]["expression"] == "neutral"
+
+
+def test_motion_override_requires_an_explicit_plan(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post("/api/live/sessions", json={"avatar_id": avatar["id"]}).json()
+        response = client.post(
+            f"/api/live/sessions/{session['id']}/turns",
+            json={"text": "안녕하세요", "motion_override": True},
+        )
+
+        assert response.status_code == 422
+        assert "motion_override requires motion_plan" in response.text
 
 
 def test_fast_session_requires_deployed_fast_renderer(tmp_path):

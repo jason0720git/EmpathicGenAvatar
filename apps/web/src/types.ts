@@ -38,10 +38,17 @@ export interface LiveSession {
 
 export type RendererMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'ditto_realtime_trt10' | 'fast'
 
-export type ExpressionIntent = 'neutral' | 'warm' | 'concern'
+export type ExpressionIntent = 'angry' | 'disgust' | 'fear' | 'happy' | 'neutral' | 'sad' | 'surprise' | 'contempt'
+
+export interface AffectIntent {
+  emotion: ExpressionIntent
+  intensity: number
+}
 
 export interface MotionPlan {
+  expression_render_mode?: 'off' | 'native' | 'legacy' | 'speech_safe'
   expression: ExpressionIntent
+  intensity: number
   head: {
     yaw_deg: number
     pitch_deg: number

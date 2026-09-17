@@ -82,12 +82,13 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 
 ## Motion controls in this prototype
 
-`POST /v1/turns/render` accepts an optional bounded `motion_plan`. The Ditto adapter applies `head.yaw_deg`, `head.pitch_deg`, `head.roll_deg`, and a smooth nod envelope through upstream `ctrl_info`; it maps `expression` to Ditto's documented coarse emotion condition. The current public Ditto hook has no independent numeric pupil-gaze API, so `gaze` produces only a small head cue and is deliberately labelled as such in the UI.
+`POST /v1/turns/render` accepts an optional bounded `motion_plan`. The affect contract is `expression` (`angry`, `disgust`, `fear`, `happy`, `neutral`, `sad`, `surprise`, `contempt`) plus `intensity` (0–1). The Ditto adapter blends its coarse emotion condition from neutral, applies a private bounded `delta_exp` preset, and applies pose through upstream `ctrl_info`. The current public Ditto hook has no independent numeric pupil-gaze API, so `gaze` produces only a small head cue and is deliberately labelled as such in the UI.
 
 ```json
 {
   "motion_plan": {
-    "expression": "concern",
+    "expression": "sad",
+    "intensity": 0.42,
     "head": { "yaw_deg": 3, "pitch_deg": 0, "roll_deg": 0 },
     "gaze": { "x": 0, "y": 0 },
     "nod": { "start_ms": 320, "duration_ms": 460, "amplitude_deg": 5 }
