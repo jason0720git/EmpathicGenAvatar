@@ -1,0 +1,21 @@
+.test-studio { max-width: 1500px; margin: 0 auto; padding: 24px; }
+.test-toolbar { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.test-toolbar > span { margin-left: auto; color: #92a7d5; font-size: 14px; }
+.test-toolbar select { background: #141d38; color: #edf1ff; border: 1px solid #303959; padding: 10px; border-radius: 8px; }
+.test-modes { display: flex; gap: 6px; padding: 5px; background: #111931; border-radius: 12px; }
+.test-modes button { padding: 12px 22px; border: 0; border-radius: 8px; color: #a9b8db; background: transparent; }
+.test-modes button.selected { background: #b697f6; color: #11162a; font-weight: 700; }
+.test-studio .live-layout { grid-template-columns: minmax(0, 1fr) 350px; }
+.test-studio .video-canvas { min-height: 0; height: clamp(280px, calc(100vh - 330px), 720px); }
+.test-studio .video-bottom, .test-studio .render-pipeline { display: none; }
+.test-studio .live-stage-top h2 { font-size: 21px; }
+.test-studio .live-stage-top .eyebrow { font-size: 10px; }
+.test-studio .affect-control details { margin-bottom: 10px; }
+.test-studio summary { cursor: pointer; color: #9caed3; font-size: 12px; }
+.wav-test-panel { align-self: start; border: 1px solid #293452; padding: 24px; border-radius: 16px; background: #111931; display: grid; gap: 20px; }
+.wav-test-panel h3, .wav-test-panel p { margin: 0; }
+.wav-test-panel p { font-size: 13px; line-height: 1.7; color: #96a9d2; }
+.wav-filename, .wav-test-history { overflow-wrap: anywhere; }
+.wav-test-panel audio { width: 100%; }
+.wav-test-history { max-height: 260px; overflow: auto; }
+@media (max-width: 900px) { .test-studio .live-layout { grid-template-columns: 1fr; } .test-studio { padding: 16px; } .test-toolbar > span { margin-left: 0; } }

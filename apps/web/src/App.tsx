@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit, ENTRY_MIX_MS, TRANSITION_MS, type AvatarTransition } from './avatarTransition'
+import { IdleCanvas } from './IdleCanvas'
 import './rendered-video.css'
+import './test-studio.css'
 import {
   AlertCircle,
   ArrowRight,
@@ -152,6 +155,33 @@ function initials(name: string) {
 }
 
 export default function App() {
+  const [mode, setMode] = useState<'wav_test' | 'realtime'>('wav_test')
+  const [avatars, setAvatars] = useState<Avatar[]>([])
+  const [selected, setSelected] = useState('demo-seoyeon')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let alive = true
+    void api.avatars().then(items => { if (alive) setAvatars(items) }).catch(() => { if (alive) setError('서버에 연결할 수 없습니다. 새로고침해 주세요.') })
+    return () => { alive = false }
+  }, [])
+  const avatar = avatars.find(item => item.id === selected) ?? avatars[0]
+  return <main className="test-studio">
+    <header className="test-toolbar">
+      <div className="test-modes" role="group" aria-label="실행 모드">
+        <button className={mode === 'wav_test' ? 'selected' : ''} onClick={() => setMode('wav_test')}>WAV 테스트</button>
+        <button className={mode === 'realtime' ? 'selected' : ''} onClick={() => setMode('realtime')}>Realtime 대화</button>
+      </div>
+      <select aria-label="아바타 선택" value={avatar?.id ?? ''} onChange={event => setSelected(event.target.value)}>{avatars.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+      <span>Ditto Realtime · TensorRT 10</span>
+    </header>
+    {error && <p role="alert">{error}</p>}
+    {avatar && <LiveRoom key={`${avatar.id}-${mode}`} avatar={avatar} method="ditto_realtime_trt10" sessionInstruction={SEOYEON_SESSION_INSTRUCTION} mode={mode} apiOnline onExit={() => setMode('wav_test')} />}
+  </main>
+}
+
+// Retained for future avatar administration; the test homepage no longer
+// routes through the promotional dashboard or renderer picker.
+export function LegacyStudio() {
   const [page, setPage] = useState<Page>('dashboard')
   const [avatars, setAvatars] = useState<Avatar[]>([])
   const [selectedAvatarId, setSelectedAvatarId] = useState(defaultAvatar.id)
@@ -475,7 +505,8 @@ function Consent({ checked, onChange, children }: { checked: boolean; onChange: 
   return <label className="consent-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><span className="fake-checkbox">{checked && <Check size={13} />}</span><span>{children}</span></label>
 }
 
-export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit }: { avatar: Avatar; method: ConversationMethod; sessionInstruction: string; apiOnline: boolean; onExit: () => void }) {
+export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit, mode = 'realtime' }: { avatar: Avatar; method: ConversationMethod; sessionInstruction: string; apiOnline: boolean; onExit: () => void; mode?: 'realtime' | 'wav_test' }) {
+  const wavTest = mode === 'wav_test'
   const [state, setState] = useState<LiveState>('connecting')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -489,8 +520,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const [cameraError, setCameraError] = useState<string | null>(null)
   const [voiceTurnMode, setVoiceTurnMode] = useState<VoiceTurnMode>('push_to_talk')
   const [voiceError, setVoiceError] = useState<string | null>(null)
-  const [affectMode, setAffectMode] = useState<AffectMode>('auto')
-  const [affectIntensity, setAffectIntensity] = useState(0.5)
+  const [affectMode, setAffectMode] = useState<AffectMode>(wavTest ? 'neutral' : 'auto')
+  const [affectIntensity, setAffectIntensity] = useState(wavTest ? 1 : 0.5)
   const [expressionRenderMode, setExpressionRenderMode] = useState<'off' | 'native' | 'legacy' | 'speech_safe'>('speech_safe')
   const [diagnosticTurns, setDiagnosticTurns] = useState<Array<{id: string; label: string}>>([])
   const [feedbackTurn, setFeedbackTurn] = useState('')
@@ -527,7 +558,9 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const cameraStreamRef = useRef<MediaStream | null>(null)
   const cameraVideoRef = useRef<HTMLVideoElement>(null)
   const renderedAudioRef = useRef<HTMLAudioElement>(null)
+  const wavPreviewRef = useRef<HTMLAudioElement>(null)
   const realtimeCanvasRef = useRef<HTMLCanvasElement>(null)
+  const idleImageRef = useRef<HTMLCanvasElement>(null)
   const realtimeSocketRef = useRef<WebSocket | null>(null)
   const realtimeAudioRef = useRef<AudioContext | null>(null)
   const sessionRef = useRef<string | null>(null)
@@ -544,7 +577,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     mountedRef.current = true
     const connect = async () => {
       try {
-        const session = apiOnline ? await api.createSession(avatar.id, method, sessionInstruction) : { id: `local-room-${Date.now()}`, avatar_id: avatar.id, state: 'active', created_at: new Date().toISOString(), renderer_method: method, session_instruction: sessionInstruction }
+        const session = apiOnline ? await api.createSession(avatar.id, method, wavTest ? undefined : sessionInstruction, mode) : { id: `local-room-${Date.now()}`, avatar_id: avatar.id, state: 'active', created_at: new Date().toISOString(), renderer_method: method, session_instruction: sessionInstruction }
         if (!mountedRef.current) return
         setSessionId(session.id)
         sessionRef.current = session.id
@@ -568,7 +601,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       if (sessionRef.current && apiOnline) void api.endSession(sessionRef.current).catch(() => undefined)
       sessionRef.current = null
     }
-  }, [avatar.id, apiOnline, method, sessionInstruction])
+  }, [avatar.id, apiOnline, method, sessionInstruction, mode, wavTest])
 
   useEffect(() => {
     let cancelled = false
@@ -647,6 +680,13 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     let receivedEnd = false
     let pendingDecodes = 0
     let firstFramePresented = false
+    let entryTransition: AvatarTransition | null = null
+    let entryFinished = false
+    let entryRenderPeakMs = 0
+    let exitStarted = false
+    let exitCompleted = false
+    let exitStartPts: number | null = null
+    let lastPresentedPts = -1
     const isCurrent = () => mountedRef.current && realtimeAudioRef.current === context
     let peakAudioDelayMs = 0
     const elapsed = () => Math.max(0, Math.round(performance.now() - turnStartedAt))
@@ -661,6 +701,12 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       const startAt = mediaStart
       const draw = () => {
         if (!isCurrent()) { bitmap.close(); return }
+        // JPEG decodes can complete out of order. Never move visual time
+        // backwards when an old decode or timer arrives late.
+        if (ptsMs <= lastPresentedPts) {
+          telemetry('playout_drift', {pts_ms:ptsMs,last_presented_pts:lastPresentedPts,dropped_stale_frame:true})
+          bitmap.close(); return
+        }
         const remaining = startAt + ptsMs / 1000 - context.currentTime
         if (remaining > 0.008) {
           window.setTimeout(draw, Math.min(remaining * 1000, 40))
@@ -674,7 +720,35 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             canvas.width = bitmap.width
             canvas.height = bitmap.height
           }
-          ctx.drawImage(bitmap, 0, 0)
+          if (!firstFramePresented && idleAvailable && idleImageRef.current) {
+            entryTransition = method === 'ditto_realtime_trt10'
+              ? beginIdleEntryTransition(idleImageRef.current,startAt*1000,bitmap)
+              : beginTransition(idleImageRef.current,bitmap,canvas.width,canvas.height,context.currentTime*1000,false)
+            telemetry('visual_transition', {direction:'idle_to_speech', strategy:'direct_live_handoff_v12', duration_ms:entryTransition?.mixMs ?? 160, dx:entryTransition?.dx ?? 0, dy:entryTransition?.dy ?? 0, angle:0, scale:1, full_frame_transform:false, live_idle:method === 'ditto_realtime_trt10', source_anchor:false, aligned:entryTransition?.accepted ?? false})
+          }
+          const renderStarted=performance.now()
+          if (entryTransition) drawTransition(ctx,bitmap,entryTransition,context.currentTime*1000)
+          else ctx.drawImage(bitmap, 0, 0)
+          if(!entryFinished) entryRenderPeakMs=Math.max(entryRenderPeakMs,performance.now()-renderStarted)
+          if (!entryFinished && (!entryTransition || context.currentTime*1000-startAt*1000 >= ENTRY_MIX_MS)) {
+            entryFinished = true
+            entryTransition = null
+            telemetry('visual_transition', {direction:'idle_to_speech', phase:'completed', strategy:'direct_live_handoff_v12', pts_ms:ptsMs, render_peak_ms:Math.round(entryRenderPeakMs*100)/100, idle_parking_allowed:false})
+          }
+          // The end marker fixes the actual stream duration. Mix during its
+          // silent tail, while BOTH images still move; never visit a portrait.
+          if (method === 'ditto_realtime_trt10' && receivedEnd && idleAvailable && idleImageRef.current) {
+            const tailStart = lastVideoPacketPts + 40 - 480
+            if (ptsMs >= tailStart) {
+              // If the end marker arrives late, start from zero opacity,
+              // not midway through a blend (which would create another jump).
+              exitStartPts ??= ptsMs
+              if (!exitStarted) telemetry('visual_transition', {direction:'speech_to_idle', strategy:'direct_live_handoff_v12', pts_ms:ptsMs, tail_start_ms:tailStart, live_idle:true, source_anchor:false})
+              exitStarted = true
+              exitCompleted = drawLiveExit(ctx,idleImageRef.current,ptsMs,exitStartPts)
+            }
+          }
+          lastPresentedPts = ptsMs
           if (!firstFramePresented) {
             firstFramePresented = true
             setStreamReady(true)
@@ -781,7 +855,9 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             return
           }
           const endAt = Math.max(finalAudioAt, (mediaStart ?? context.currentTime) + (latestDecodedVideoPts + 40) / 1000)
-          if (pendingDecodes || mediaStart === null || context.currentTime < endAt) {
+          // Timer order is not presentation order: do not hide the canvas
+          // before the final decoded frame's scheduled draw actually ran.
+          if (pendingDecodes || mediaStart === null || context.currentTime < endAt || lastPresentedPts < latestDecodedVideoPts) {
             realtimeVisualTimerRef.current = window.setTimeout(finish, 40)
             return
           }
@@ -791,9 +867,25 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
               : Math.max(200, initialBufferMs - 50)
             window.sessionStorage.setItem(PLAYOUT_BUFFER_KEY, String(nextBuffer))
             telemetry('playback_ended', { jpeg_decode_failures: jpegDecodeFailures, video_pts_gaps: videoPtsGaps, next_buffer_ms: nextBuffer })
-            stopRealtime()
-            setAudioLevel(0.13)
-            setState('ready')
+            const canvas = realtimeCanvasRef.current
+            const idle = idleImageRef.current
+            const ctx = canvas?.getContext('2d')
+            // Late end markers use the last displayed composite, never the
+            // source photograph. Normally the live tail already completed.
+            const exitTransition = !exitCompleted && canvas && idleAvailable && idle ? beginTransition(canvas,idle,canvas.width,canvas.height,performance.now(),false) : null
+            telemetry('visual_transition', {direction:'speech_to_idle', phase:'completed', strategy:'direct_live_handoff_v12', duration_ms:exitTransition ? TRANSITION_MS : 0, live_tail_completed:exitCompleted, fallback:!!exitTransition, source_anchor:false})
+            const handoff = () => {
+              if (!isCurrent()) return
+              if (ctx && idle && exitTransition) drawTransition(ctx,idle,exitTransition,performance.now())
+              if (exitTransition && performance.now()-exitTransition.started<TRANSITION_MS) {
+                realtimeVisualTimerRef.current=window.setTimeout(handoff,16)
+                return
+              }
+              stopRealtime()
+              setAudioLevel(0.13)
+              setState('ready')
+            }
+            handoff()
           }
         }
         finish()
@@ -850,6 +942,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const submitTurn = async (rawText: string) => {
     const text = rawText.trim()
     if (!text || !sessionId) return
+    if (wavPreviewRef.current && !wavPreviewRef.current.paused) wavPreviewRef.current.pause()
     stopListening()
     setDraft('')
     const turnId = `user-${Date.now()}`
@@ -874,7 +967,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       setFeedbackTurn(result.turn_id); setFeedbackStatus(''); setFeedbackSecond(''); setFeedbackNote('')
       if (apiOnline) void api.telemetry({ turn_id: result.turn_id, event: 'turn_response', elapsed_ms: Math.round(performance.now() - turnStartedAt) })
       setCaptions((items) => [...items, { id: result.turn_id, role: 'assistant', text: result.assistant_text, at: new Date() }])
-      if (apiOnline) void syncAssistantCaption(sessionId, result.turn_id)
+      if (apiOnline && !wavTest) void syncAssistantCaption(sessionId, result.turn_id)
       setState('speaking')
       const video = mediaUrl(result.renderer.stream_url)
       if (result.renderer.stream_url?.startsWith('/avatar-stream/') || result.renderer.stream_url?.startsWith('/avatar-stream-realtime/') || result.renderer.stream_url?.startsWith('/avatar-stream-trt10/')) {
@@ -1026,6 +1119,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const isSpeaking = state === 'speaking'
   const renderedAvatarVisible = (realtimeActive && streamReady) || Boolean(renderedVideo && streamReady)
   const stateLabel: Record<LiveState, string> = { connecting: '연결 중', ready: '대화 준비됨', listening: '듣는 중', transcribing: '음성을 정리 중', thinking: '생각 중', speaking: '말하는 중', reconnecting: '다시 연결 중', error: '연결 문제' }
+  if (wavTest) Object.assign(stateLabel, {ready:'테스트 준비됨',thinking:'영상 생성 중',speaking:'WAV 재생 중'})
   const lastAssistant = [...captions].reverse().find((item) => item.role === 'assistant')
   return (
     <div className="live-layout">
@@ -1034,7 +1128,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
-          <img className={`idle-avatar-video ${state === 'listening' ? 'listening' : ''} ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} src={idleUrl(avatar.id, idleVariant, idleRevision)} onLoad={() => setIdleAvailable(true)} onError={() => setIdleAvailable(false)} alt="" aria-label={`${avatar.name} 대기 아바타 영상`} />
+          <IdleCanvas canvasRef={idleImageRef} className={`idle-avatar-video ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} source={idleUrl(avatar.id, idleVariant, idleRevision)} onReady={setIdleAvailable} label={`${avatar.name} 대기 아바타 영상`} />
           {realtimeActive ? <canvas ref={realtimeCanvasRef} className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} aria-label={`${avatar.name} 실시간 아바타 영상`} /> : renderedVideo && (renderedVideo.includes('/live-media/') ? <img className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} alt={`${avatar.name} 실시간 아바타 영상`} onLoad={() => setStreamReady(true)} onError={() => { setRenderedVideo(undefined); setStreamReady(true) }} /> : <video className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} autoPlay playsInline onEnded={() => { setRenderedVideo(undefined); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedVideo(undefined); setState('ready') }} />)}
           {renderedAudio && <audio ref={renderedAudioRef} src={renderedAudio} preload="auto" onEnded={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} />}
           <div className={`camera-pip ${cameraEnabled ? 'visible' : ''}`}>
@@ -1045,13 +1139,14 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime_trt10' ? 'Ditto TRT 10 · GPU' : method === 'ditto_realtime_fast' ? 'Ditto Fast Lane · GPU' : method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
-          <div className="affect-control-head"><span>Expression test</span><small>{affectMode === 'auto' ? 'Auto · Realtime tool call' : 'Manual · tool call 생략'}</small></div>
+          <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? '고정 WAV · API 토큰 사용 없음' : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
+          <details><summary>고급 합성 설정</summary>
           <div className="affect-buttons" role="group" aria-label="표정 합성 비교 모드">
             {([['speech_safe','발음 보호 (기본)'],['off','표정 없음'],['native','감정 조건만'],['legacy','기존 증폭 (비교용)']] as const).map(([mode,label]) => <button type="button" key={mode} className={expressionRenderMode === mode ? 'selected' : ''} onClick={() => setExpressionRenderMode(mode)}>{label}</button>)}
           </div>
-          <small>다음 답변부터 적용 · 보호 모드는 입 움직임 우선, 미소가 약해질 수 있습니다. 대화별 음성이 달라 완전한 A/B는 아닙니다.</small>
+          </details>
           <div className="affect-buttons" role="group" aria-label="표정 선택">
-            <button type="button" className={affectMode === 'auto' ? 'selected auto' : ''} onClick={() => setAffectMode('auto')}>Auto</button>
+            {!wavTest && <button type="button" className={affectMode === 'auto' ? 'selected auto' : ''} onClick={() => setAffectMode('auto')}>Auto</button>}
             {affectOptions.map((option) => <button type="button" key={option.value} className={affectMode === option.value ? 'selected' : ''} onClick={() => setAffectMode(option.value)}>{option.label}</button>)}
           </div>
           <div className="intensity-buttons" role="group" aria-label="표정 강도 선택">
@@ -1069,13 +1164,23 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             <p role="status">{feedbackStatus}</p>
           </details>
         </div>
-        <div className="voice-turn-mode" role="group" aria-label="음성 턴 방식"><button className={voiceTurnMode === 'push_to_talk' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('push_to_talk'); stopListening() }}>Push to talk</button><button className={voiceTurnMode === 'protected_auto_turn' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('protected_auto_turn'); stopListening() }}>Protected auto turn</button></div>
+        {!wavTest && <><div className="voice-turn-mode" role="group" aria-label="음성 턴 방식"><button className={voiceTurnMode === 'push_to_talk' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('push_to_talk'); stopListening() }}>Push to talk</button><button className={voiceTurnMode === 'protected_auto_turn' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('protected_auto_turn'); stopListening() }}>Protected auto turn</button></div>
         <div className="voice-turn-note">{voiceTurnMode === 'push_to_talk' ? '마이크를 한 번 눌러 말하고, 다시 누르면 전송합니다.' : '아바타 발화가 끝난 0.8초 뒤 자동 청취 · 음성 후 1.1초 무음이면 전송합니다.'}</div>
         <div className="stage-controls"><button className={`round-control ${cameraEnabled ? 'active-camera' : ''}`} aria-label={cameraEnabled ? '카메라 끄기' : '카메라 켜기'} onClick={() => void toggleCamera()}>{cameraEnabled ? <Camera size={19} /> : <CameraOff size={19} />}</button><button className="round-control" aria-label="대화 종료" onClick={onExit}><X size={20} /></button></div>
         {cameraError && <div className="camera-note"><CameraOff size={14} /> {cameraError}</div>}
+        </>}
         {voiceError && <div className="camera-note"><MicOff size={14} /> {voiceError}</div>}
       </section>
-      <aside className="conversation-panel">
+      {wavTest ? <aside className="wav-test-panel">
+        <h3>WAV 표정 테스트</h3>
+        <p className="wav-filename">marin_gpt-4o-mini-tts_1x_2026-09-18T04_03_21-696Z.wav</p>
+        <audio ref={wavPreviewRef} controls preload="metadata" src="/api/test-audio" aria-label="테스트 음성 듣기" />
+        <button className="primary-button" disabled={state !== 'ready' || !sessionId} onClick={() => void submitTurn('고정 WAV 표정 테스트')}><Play size={17}/>{state === 'thinking' ? '영상 준비 중' : state === 'speaking' ? '재생 중' : '선택한 감정으로 생성·재생'}</button>
+        {state === 'speaking' && <button className="secondary-button" onClick={() => void interrupt()}>재생 중지</button>}
+        <p>같은 음성으로 감정만 바꿔 비교합니다. Realtime·TTS·감정 tool call은 호출하지 않습니다.</p>
+        <div className="wav-test-history" aria-live="polite">{diagnosticTurns.map(turn => <p key={turn.id}>{turn.label}</p>)}</div>
+        {captions.at(-1)?.id.startsWith('error-') && <p role="alert">{captions.at(-1)?.text}</p>}
+      </aside> : <aside className="conversation-panel">
         <div className="conversation-header"><div><span className="eyebrow subtle">LIVE CAPTIONS</span><h3>대화</h3></div><button className="icon-button" aria-label="세션 정보"><CircleHelp size={18} /></button></div>
         <div className="privacy-banner"><ShieldCheck size={15} /><span>개발 진단 모드: 오디오는 저장하지 않으며, 대화 텍스트·표정 결정 로그는 이 로컬 환경에만 저장됩니다.</span></div>
         <div className="transcript-list">
@@ -1085,7 +1190,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitTurn(draft) }}><button type="button" className={`composer-mic ${state === 'listening' ? 'active' : ''}`} disabled={!voiceSupported || state === 'connecting' || state === 'thinking'} onClick={toggleVoiceInput} aria-label={state === 'listening' ? '음성 입력 종료 및 전송' : '음성 입력 시작'}>{state === 'listening' ? <Pause size={17} /> : <Mic size={17} />}</button><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={state === 'listening' ? '듣는 중… 말한 내용이 여기에 표시됩니다.' : '메시지 입력…'} rows={1} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submitTurn(draft) } }} /><button type="submit" disabled={!draft.trim() || state === 'thinking'} aria-label="메시지 보내기"><SendHorizontal size={17} /></button></form>
         <div className="caption-footnote"><span><span className="keycap">↵</span> 보내기</span>{voiceSupported ? <span><Mic size={13} /> {voiceTurnMode === 'push_to_talk' ? '두 번 눌러 음성 전송' : 'VAD 자동 전송'}</span> : <span>텍스트 대화 사용 가능</span>}</div>
         {lastAssistant && <button className="replay-button" onClick={() => speak({ turn_id: lastAssistant.id, assistant_text: lastAssistant.text, visemes: [], renderer: { mode: 'preview', status: 'replay' } }, avatar.voice, setState, setAudioLevel)}><Play size={14} /> 마지막 답변 다시 듣기</button>}
-      </aside>
+      </aside>}
     </div>
   )
 }

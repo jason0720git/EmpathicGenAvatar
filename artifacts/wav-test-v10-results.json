@@ -1,0 +1,58 @@
+[
+  {
+    "emotion": "neutral",
+    "turn_id": "wav-audit-55af4d1016c0",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "happy",
+    "turn_id": "wav-audit-3b02aa8f9cb7",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "angry",
+    "turn_id": "wav-audit-6fabe01bca80",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "disgust",
+    "turn_id": "wav-audit-3ef69ea174c4",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "fear",
+    "turn_id": "wav-audit-793a85ade4b4",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "sad",
+    "turn_id": "wav-audit-2559228bb056",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "surprise",
+    "turn_id": "wav-audit-c5d72fa42be1",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "emotion": "contempt",
+    "turn_id": "wav-audit-f2d5fb3793ee",
+    "video_frames": 137,
+    "pcm_bytes": 148800,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  }
+]

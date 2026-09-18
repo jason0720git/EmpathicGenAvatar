@@ -80,7 +80,7 @@ class ConversationProvider:
     async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None) -> ConversationResponse:
         raise NotImplementedError
 
-    async def start_session(self, session_id: str, *, persona: str, session_instruction: str | None = None) -> None:
+    async def start_session(self, session_id: str, *, persona: str, session_instruction: str | None = None, voice: str | None = None) -> None:
         return None
 
     async def close_session(self, session_id: str) -> None:
@@ -151,7 +151,7 @@ class OllamaConversation(ConversationProvider):
 
 
 class OpenAIRealtimeConversation(ConversationProvider):
-    """Server-side Realtime Marin PCM bridge for Ditto's shared audio clock."""
+    """Server-side Realtime PCM bridge for Ditto's shared audio clock."""
 
     name = "openai-realtime"
 
@@ -160,6 +160,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
         socket: object
         lock: asyncio.Lock = field(default_factory=asyncio.Lock)
         connected_ms: float = 0.0
+        voice: str = "marin"
 
     def __init__(self, api_key: str, model: str, data_dir: Path) -> None:
         self.api_key = api_key
@@ -188,9 +189,11 @@ class OpenAIRealtimeConversation(ConversationProvider):
         instructions = f"{base}\n\nSession instruction (follow when it does not conflict with safety or the spoken reply limit):\n{session_instruction.strip()}" if session_instruction and session_instruction.strip() else base
         return f"{instructions}\n\n{SPOKEN_REPLY_LIMIT}"
 
-    async def start_session(self, session_id: str, *, persona: str, session_instruction: str | None = None) -> None:
+    async def start_session(self, session_id: str, *, persona: str, session_instruction: str | None = None, voice: str | None = None) -> None:
         if session_id in self._sessions:
             return
+        # Legacy display labels (e.g. Calm Korean) retain the existing voice.
+        selected_voice = "echo" if voice == "echo" else "marin"
         started = time.perf_counter()
         socket = await connect(
             f"wss://api.openai.com/v1/realtime?model={self.model}",
@@ -198,12 +201,12 @@ class OpenAIRealtimeConversation(ConversationProvider):
         )
         await socket.send(json.dumps({"type": "session.update", "session": {
             "type": "realtime", "output_modalities": ["audio"], "instructions": self._instructions(persona, session_instruction),
-            "audio": {"output": {"voice": "marin", "format": {"type": "audio/pcm", "rate": 24000}}},
+            "audio": {"output": {"voice": selected_voice, "format": {"type": "audio/pcm", "rate": 24000}}},
             "tools": [AFFECT_TOOL],
         }}))
         elapsed = (time.perf_counter() - started) * 1000
-        self._sessions[session_id] = self._Session(socket=socket, connected_ms=elapsed)
-        print("OpenAI Realtime session connected: " + json.dumps({"session_id": session_id, "connect_ms": round(elapsed, 1), "model": self.model, "voice": "marin"}), flush=True)
+        self._sessions[session_id] = self._Session(socket=socket, connected_ms=elapsed, voice=selected_voice)
+        print("OpenAI Realtime session connected: " + json.dumps({"session_id": session_id, "connect_ms": round(elapsed, 1), "model": self.model, "voice": selected_voice}), flush=True)
 
     async def close_session(self, session_id: str) -> None:
         entry = self._sessions.pop(session_id, None)
@@ -278,7 +281,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
             await self.start_session(key, persona=persona, session_instruction=session_instruction)
         entry = self._sessions[key]
         self.audio_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"realtime-marin-{uuid.uuid4().hex}.pcm"
+        filename = f"realtime-{entry.voice}-{uuid.uuid4().hex}.pcm"
         audio_path = self.audio_dir / filename
         done_path = audio_path.with_suffix(".done")
         ready: asyncio.Future[ConversationResponse] = asyncio.get_running_loop().create_future()
@@ -341,7 +344,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                             if chunk:
                                 if first_audio_ms is None:
                                     first_audio_ms = (time.perf_counter() - started) * 1000
-                                # `marin` arrives as 24 kHz S16LE PCM. Convert
+                                # Realtime arrives as 24 kHz S16LE PCM. Convert
                                 # each independent 3-sample block to 16 kHz as
                                 # it arrives, so Ditto can start before the
                                 # model has finished speaking.
@@ -358,7 +361,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                                     if not ready.done() and fragments:
                                         ready.set_result(ConversationResponse(
                                             text="".join(fragments).strip(), audio_path=f"/data/realtime-audio/{filename}",
-                                            voice="marin", audio_streaming=True, affect=affect,
+                                            voice=entry.voice, audio_streaming=True, affect=affect,
                                             affect_elapsed_ms=affect_elapsed_ms,
                                         ))
                     elif event_type in {"response.output_audio_transcript.delta", "response.audio_transcript.delta", "response.output_text.delta", "response.text.delta"}:
@@ -381,7 +384,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                 text = (completed_text or "".join(fragments)).strip()
                 if text and audio_started:
                     ready.set_result(ConversationResponse(
-                        text=text, audio_path=f"/data/realtime-audio/{filename}", voice="marin", audio_streaming=True,
+                        text=text, audio_path=f"/data/realtime-audio/{filename}", voice=entry.voice, audio_streaming=True,
                         affect=affect, affect_elapsed_ms=affect_elapsed_ms,
                     ))
                 else:
@@ -397,7 +400,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                 "caption_parts": len(transcript.parts),
                 "caption_chars": len(final_caption),
                 "model": self.model,
-                "voice": "marin",
+                "voice": entry.voice,
                 "session_connect_ms": round(connected_ms or -1, 1),
                 "turn_connect_ms": 0.0,
                 "first_event_ms": round(first_event_ms, 1) if first_event_ms is not None else None,
@@ -408,7 +411,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                 "pcm_ms": round(pcm_ms, 1),
             }, sort_keys=True), flush=True)
         try:
-            producer = asyncio.create_task(produce(), name=f"openai-realtime-marin-{filename}")
+            producer = asyncio.create_task(produce(), name=f"openai-realtime-{filename}")
             def report(task: asyncio.Task[None]) -> None:
                 if task.cancelled():
                     return

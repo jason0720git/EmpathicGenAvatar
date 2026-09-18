@@ -51,10 +51,10 @@ export const api = {
   },
   deleteAvatar: (id: string) => request<void>(`/api/avatars/${id}`, { method: 'DELETE' }),
   prepareIdle: (id: string) => request<{ status: string }>(`/api/avatars/${id}/idle`, { method: 'POST' }),
-  createSession: (avatarId: string, rendererMethod: RendererMethod, sessionInstruction?: string) =>
+  createSession: (avatarId: string, rendererMethod: RendererMethod, sessionInstruction?: string, mode: 'realtime' | 'wav_test' = 'realtime') =>
     request<LiveSession>('/api/live/sessions', {
       method: 'POST',
-      body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction }),
+      body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction, mode }),
     }),
   sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe') => {
     // Auto intentionally omits affect_override, so only that path invokes

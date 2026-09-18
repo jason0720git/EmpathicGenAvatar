@@ -1,0 +1,47 @@
+[
+  {
+    "variant": 0,
+    "revisions": {
+      "4": {
+        "seam_mae": 7.55774139964206,
+        "previous_step_mae": 0.7697621525606595,
+        "next_step_mae": 2.060933259569044
+      },
+      "5": {
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.3377959315179122,
+        "next_step_mae": 0.3297291988590558
+      }
+    }
+  },
+  {
+    "variant": 1,
+    "revisions": {
+      "4": {
+        "seam_mae": 9.536931250128063,
+        "previous_step_mae": 0.8072985666128979,
+        "next_step_mae": 1.9652890973695682
+      },
+      "5": {
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.3380524107992615,
+        "next_step_mae": 0.321470989932305
+      }
+    }
+  },
+  {
+    "variant": 2,
+    "revisions": {
+      "4": {
+        "seam_mae": 8.151296633479802,
+        "previous_step_mae": 0.7212649586418327,
+        "next_step_mae": 2.110237338720105
+      },
+      "5": {
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.3321668118636152,
+        "next_step_mae": 0.3301566643279713
+      }
+    }
+  }
+]

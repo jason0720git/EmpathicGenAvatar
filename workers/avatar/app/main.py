@@ -167,11 +167,18 @@ class BlinkAwareMotionStitch:
     """
     def __init__(self, inner):
         self.inner = inner
+        self.boundary_timeline = None
+        self.boundary_preroll = 0
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
 
     def setup(self, *args, **kwargs):
+        self.boundary_timeline = None
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
         return self.inner.setup(*args, **kwargs)
+
+    def set_boundary_timeline(self, timeline, preroll):
+        self.boundary_timeline = timeline
+        self.boundary_preroll = preroll
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
@@ -179,6 +186,9 @@ class BlinkAwareMotionStitch:
     def __call__(self, x_s_info, x_d_info, **kwargs):
         protect = kwargs.pop("preserve_speech_lips", False)
         smile_corners = kwargs.pop("allow_smile_corners", False)
+        boundary_alpha = kwargs.pop("boundary_alpha", None)
+        if self.boundary_timeline is not None:
+            boundary_alpha = self.boundary_timeline.boundary_weight(self.inner.idx - self.boundary_preroll)
         baseline = None
         if protect:
             # Two tiny stitching passes, NOT two Audio2Motion/decoder passes.
@@ -225,7 +235,13 @@ class BlinkAwareMotionStitch:
                 self.protection_stats["peak_corner_delta"] = max(self.protection_stats.get("peak_corner_delta", 0.0), float(np.max(np.linalg.norm(offsets, axis=-1))))
             self.protection_stats["frames"] += 1
             self.protection_stats["peak_removed_lip_delta"] = max(self.protection_stats["peak_removed_lip_delta"], removed)
-            return source, driving
+            result = (source, driving)
+        if boundary_alpha is not None:
+            source, driving = result
+            alpha = float(np.clip(boundary_alpha, 0, 1))
+            # Close the actual implicit-coordinate loop, not just the pose
+            # offsets. No RGB crossfade or reversed eye-blink playback.
+            return source, source + alpha * (driving - source)
         return result
 # StreamSDK prepends three 40 ms chunks for its causal frontend and its
 # Audio2Motion overlap adds another ten frames.  Those 13 frames are context,
@@ -234,14 +250,16 @@ DITTO_CHUNKSIZE = (3, 5, 2)
 DITTO_PREROLL_FRAMES = 13
 # Increment whenever the generated idle media semantics change, so existing
 # cached loops cannot mask a behavior fix in a browser session.
-IDLE_ASSET_VERSION = 4
+IDLE_ASSET_VERSION = 6  # Restore the original natural-motion idle cache.
+IDLE_FPS = 25
+IDLE_FRAME_COUNT = 400  # 16 seconds, not a slowed-down 8-second clip
 # Real talking turns reserve a small silent motion bridge at each edge. The
 # browser receives these frames, but never receives silent PCM for the lead.
 DITTO_TURN_LEAD_FRAMES = 12
 DITTO_TURN_TAIL_FRAMES = 12
 
 
-def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0) -> dict[int, dict[str, float | np.ndarray]]:
+def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0, hold_expression_end: bool = False) -> dict[int, dict[str, float | np.ndarray]]:
     """Convert safe turn-level controls into Ditto's documented frame controls.
 
     Ditto accepts pose offsets in degrees. Its public online API does not expose
@@ -280,7 +298,7 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
         for frame in range(frame_offset, total_frames):
             visible_frame = frame - frame_offset
             attack = min(1.0, (visible_frame + 1) / attack_frames)
-            release = min(1.0, (total_frames - frame) / release_frames)
+            release = 1.0 if hold_expression_end else min(1.0, (total_frames - frame) / release_frames)
             residual = template * (residual_gain * plan.intensity * min(attack, release))
             if plan.expression == "surprise":
                 # A reaction peaks early and settles to a raised-brow tone;
@@ -354,7 +372,7 @@ def record_ditto_affect_diagnostic(data_root: Path, payload: dict[str, object]) 
         print(f"Ditto affect diagnostic write failed: {error}", flush=True)
 
 
-def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, float]]:
+def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) -> dict[int, dict[str, float]]:
     """A conservative, seamless idle trajectory in Ditto's pose space.
 
     The paths return to their start position so browser-side looping does not
@@ -364,21 +382,20 @@ def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, 
     controls: dict[int, dict[str, float]] = {}
     cycles = (1.0, 2.0, 1.0)[variant % 3]
     phase_offset = (0.0, 0.7, 1.4)[variant % 3]
-    for frame in range(frame_count):
-        progress = frame / max(1, frame_count - 1)
+    for frame in range(frame_count + frame_offset):
+        visible_frame = max(0, frame - frame_offset)
+        progress = visible_frame / max(1, frame_count - 1)
         phase = 2 * np.pi * cycles * progress
-        # Every loop begins and ends at Ditto's canonical source pose. This is
-        # the same pose a newly started speech turn uses, so the hand-off does
-        # not expose a head-pose jump even when it occurs near the loop edge.
         envelope = np.sin(np.pi * progress) ** 2
         yaw = 0.8 * envelope * np.sin(phase + phase_offset)
         pitch = 0.38 * envelope * np.sin(phase * 0.5 + phase_offset) + 0.16 * envelope * np.sin(phase * 2)
         roll = 0.22 * envelope * np.sin(phase * 0.7 + phase_offset)
         # Variant two includes one deliberately tiny acknowledgement nod.
         if variant % 3 == 2:
-            nod_phase = frame / max(1, frame_count - 1)
+            nod_phase = progress
             pitch += 1.15 * np.sin(np.pi * nod_phase) ** 2
         controls[frame] = {
+            "boundary_alpha": float((lambda t: t*t*t*(10+t*(-15+6*t)))(min(1.0, visible_frame / 40, (frame_count-1-visible_frame) / 40))),
             "delta_yaw": float(yaw),
             "delta_pitch": float(pitch),
             "delta_roll": float(roll),
@@ -387,18 +404,18 @@ def build_idle_ctrl_info(variant: int, frame_count: int) -> dict[int, dict[str, 
 
 
 def idle_blink_open_frames(variant: int) -> list[int]:
-    """Return repeatable natural blink gaps for an eight-second idle loop.
+    """Return varied natural blink gaps for a sixteen-second idle loop.
 
     Ditto's upstream motion stitcher owns the eyelid expression sequence from
     its calibrated ``delta_eye_arr``.  These values only control the number
-    of 25-fps open-eye frames between its 15-frame blink clips.  Two blinks
+    of 25-fps open-eye frames between its 15-frame blink clips. Four blinks
     per loop avoids the statue effect while keeping loop boundaries open.
     """
 
     patterns = (
-        [58, 78],  # blink near 2.3 s and 6.0 s
-        [68, 66],  # blink near 2.7 s and 6.0 s
-        [76, 58],  # blink near 3.0 s and 5.9 s
+        [58, 83, 62, 87],
+        [71, 59, 88, 74],
+        [79, 67, 55, 90],
     )
     return patterns[variant % len(patterns)]
 
@@ -800,7 +817,7 @@ class DittoLiveRuntime:
             outputs: list[Path] = []
             for variant in range(variants):
                 output = self.idle_path(avatar_id, variant)
-                if (output / "0199.jpg").is_file():
+                if (output / f"{IDLE_FRAME_COUNT-1:04d}.jpg").is_file():
                     outputs.append(output)
                     continue
                 output.mkdir(parents=True, exist_ok=True)
@@ -811,9 +828,9 @@ class DittoLiveRuntime:
     def _generate_idle_blocking(self, avatar_id: str, variant: int, output: Path) -> None:
         started = time.monotonic()
         sdk = self._load_sdk()
-        frame_count = 200  # eight seconds at the shared 25-fps media clock
+        frame_count = IDLE_FRAME_COUNT
         sink = IdleJpegFrameSink(output, expected_frames=frame_count, skip_initial_frames=DITTO_PREROLL_FRAMES)
-        ctrl_info = build_idle_ctrl_info(variant, frame_count + DITTO_PREROLL_FRAMES)
+        ctrl_info = build_idle_ctrl_info(variant, frame_count, frame_offset=DITTO_PREROLL_FRAMES)
         blink_open_frames = idle_blink_open_frames(variant)
         # An exact all-zero waveform is discarded by Ditto's streaming HuBERT
         # frontend and never reaches the motion pipeline. A very-low-energy,
@@ -1091,6 +1108,22 @@ class RealtimePcmTimeline:
         with self._lock:
             self._cancelled = True
             self._complete = True
+
+    def boundary_weight(self, frame: int) -> float:
+        """Anchor only silent lead/tail; never damp speech articulation.
+
+        Consult the live PCM endpoint for streaming responses, not the
+        provisional 750-frame control allocation.
+        """
+        with self._lock:
+            if frame < self._lead_frames:
+                t = float(np.clip(frame / max(1, self._lead_frames - 1), 0, 1))
+            elif self._complete and self._tail_frames:
+                speech_end = self._lead_frames + max(1, int(np.ceil(len(self._samples) / 640)))
+                t = float(np.clip(1 - (frame - speech_end) / max(1, self._tail_frames - 1), 0, 1))
+            else:
+                t = 1.0
+            return t*t*t*(10+t*(-15+6*t))
 
     def accepts_video(self, pts_ms: int) -> bool:
         with self._lock:
@@ -1460,7 +1493,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         # still clips packets exactly when the producer marks completion.
         target_frames = 750 if body.audio_streaming else timeline.frame_count()
         motion_plan = body.motion_plan or MotionPlan()
-        ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames)
+        ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames, hold_expression_end=True)
         emotion_condition = build_ditto_emotion_condition(motion_plan, target_frames + preroll_frames)
         delta_norms = [
             float(np.linalg.norm(control["delta_exp"]))
@@ -1482,6 +1515,10 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             "expression_render_mode": motion_plan.expression_render_mode,
             "audio_streaming": body.audio_streaming,
             "target_frames": target_frames,
+            "boundary_policy": "direct_live_handoff_v12",
+            "native_driving_keys": "ditto_default",
+            "boundary_lead_frames": DITTO_TURN_LEAD_FRAMES,
+            "boundary_tail_frames": DITTO_TURN_TAIL_FRAMES,
             "emotion_condition": {
                 "shape": list(emotion_condition.shape),
                 "weights": [round(float(value), 6) for value in emotion_condition[0]],
@@ -1532,6 +1569,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             profile_events.append(("turn_setup", setup_started_at, time.monotonic()))
         setup_nd_started_at = time.monotonic()
         sdk.setup_Nd(target_frames, ctrl_info=ctrl_info)
+        # Do not pull speech endpoints toward the source portrait. The browser
+        # hands native moving lead/tail frames directly to the live idle stream.
         if profile_enabled:
             profile_events.append(("setup_Nd", setup_nd_started_at, time.monotonic()))
             # The upstream SDK owns its six worker-loop functions, so wrap its
@@ -1825,7 +1864,7 @@ def create_app() -> FastAPI:
         if idle_runtime is None or variant < 0 or variant > 2:
             raise HTTPException(status_code=404, detail="idle loop not found")
         directory = idle_runtime.idle_path(avatar_id, variant)
-        paths = [directory / f"{index:04d}.jpg" for index in range(200)]
+        paths = [directory / f"{index:04d}.jpg" for index in range(IDLE_FRAME_COUNT)]
         if not all(path.is_file() for path in paths):
             raise HTTPException(status_code=404, detail="idle loop not prepared")
 
@@ -1833,6 +1872,7 @@ def create_app() -> FastAPI:
             # The live stream and idle stream now use identical OpenCV JPEG
             # encoding. This avoids the H.264 YUV/RGB tone shift at hand-off.
             frames = await asyncio.to_thread(lambda: [path.read_bytes() for path in paths])
+            deadline = time.monotonic()
             while True:
                 for frame in frames:
                     yield (
@@ -1841,7 +1881,10 @@ def create_app() -> FastAPI:
                         + frame
                         + b"\r\n"
                     )
-                    await asyncio.sleep(0.04)
+                    # Do not add socket-send time to every 40 ms frame, nor
+                    # burst many stale frames after a stalled connection.
+                    deadline = max(deadline + 1 / IDLE_FPS, time.monotonic())
+                    await asyncio.sleep(max(0, deadline - time.monotonic()))
 
         return StreamingResponse(
             loop_frames(),

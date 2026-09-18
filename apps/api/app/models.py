@@ -31,12 +31,14 @@ ExpressionRenderMode = Literal["off", "native", "legacy", "speech_safe"]
 
 
 class CreateSessionIn(BaseModel):
+    mode: Literal["realtime", "wav_test"] = "realtime"
     avatar_id: str
     renderer_method: RendererMethod = "ditto"
     session_instruction: str | None = Field(default=None, max_length=6_000)
 
 
 class SessionOut(BaseModel):
+    mode: Literal["realtime", "wav_test"] = "realtime"
     id: str
     avatar_id: str
     state: Literal["active", "ended"]
@@ -74,7 +76,7 @@ class TurnTelemetryIn(BaseModel):
         "turn_submitted", "turn_response", "socket_open", "first_packet",
         "first_video_decoded", "playback_started", "playback_ended",
         "jpeg_decode_failed", "video_pts_gap",
-        "socket_error", "socket_closed", "playout_drift", "render_requested", "first_frame_presented",
+        "socket_error", "socket_closed", "playout_drift", "render_requested", "first_frame_presented", "visual_transition",
     ]
     elapsed_ms: int = Field(ge=0, le=300_000)
     details: dict[str, int | float | str | bool] = Field(default_factory=dict)

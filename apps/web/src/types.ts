@@ -28,6 +28,7 @@ export type LiveState =
   | 'error'
 
 export interface LiveSession {
+  mode?: 'realtime' | 'wav_test'
   id: string
   avatar_id: string
   state: 'active' | 'ended'

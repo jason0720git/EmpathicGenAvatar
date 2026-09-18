@@ -1,0 +1,29 @@
+[
+  {
+    "turn": "anchor-e2f079c13b31",
+    "emotion": "fear",
+    "frames": 141,
+    "first_to_idle_mae": 0.0,
+    "last_to_idle_mae": 0.0,
+    "last_adjacent_mae": 0.21228691935539246,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "turn": "anchor-93e431322b05",
+    "emotion": "happy",
+    "frames": 141,
+    "first_to_idle_mae": 0.0,
+    "last_to_idle_mae": 0.0,
+    "last_adjacent_mae": 0.220084547996521,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  },
+  {
+    "turn": "anchor-f990e1562050",
+    "emotion": "happy",
+    "frames": 141,
+    "first_to_idle_mae": 0.0,
+    "last_to_idle_mae": 0.0,
+    "last_adjacent_mae": 0.2231961339712143,
+    "pcm_sha256": "c7e1bfd30aa9d7886509d48627475a2d323855fbf2ed6957b70de3934cf19e4e"
+  }
+]

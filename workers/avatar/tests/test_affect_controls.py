@@ -284,3 +284,79 @@ def test_cancel_waits_for_native_thread_before_releasing_sdk():
             wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
             wav.writeframes(bytes(3200))
         asyncio.run(check(root))
+
+
+def test_idle_coordinates_close_at_visible_not_preroll_endpoints():
+    from app.main import build_idle_ctrl_info, BlinkAwareMotionStitch, DITTO_PREROLL_FRAMES
+    class Stitch:
+        def __call__(self, source, driving, **kwargs):
+            assert 'boundary_alpha' not in kwargs
+            return source, driving
+    wrapper = BlinkAwareMotionStitch(Stitch())
+    source = np.zeros((1,21,3),np.float32)
+    driving = np.ones_like(source)
+    for variant in range(3):
+        controls=build_idle_ctrl_info(variant,400,frame_offset=DITTO_PREROLL_FRAMES)
+        start=DITTO_PREROLL_FRAMES
+        end=start+399
+        assert controls[start]['boundary_alpha'] == controls[end]['boundary_alpha'] == 0
+        assert controls[start+40]['boundary_alpha'] == 1
+        assert controls[start+1]['boundary_alpha'] < .002
+        assert controls[end-1]['boundary_alpha'] < .002
+        for i in (start,end):
+            _, output=wrapper(source,driving,**controls[i])
+            assert np.array_equal(source,output)
+
+
+def test_idle_duration_and_blinks_cover_the_longer_loop():
+    from app.main import IDLE_FRAME_COUNT, IDLE_FPS, idle_blink_open_frames
+    assert IDLE_FRAME_COUNT / IDLE_FPS == 16
+    for variant in range(3):
+        gaps = idle_blink_open_frames(variant)
+        assert len(gaps) == 4 and len(set(gaps)) > 2
+        assert sum(gaps) + 15 * len(gaps) < IDLE_FRAME_COUNT - 25
+
+
+def test_speech_boundary_anchors_only_silent_frames_with_live_duration():
+    from app.main import RealtimePcmTimeline, BlinkAwareMotionStitch
+    timeline = RealtimePcmTimeline(12, 12)
+    timeline.append(np.ones(640 * 10, dtype=np.int16))
+    assert timeline.boundary_weight(0) == 0
+    assert timeline.boundary_weight(11) == 1
+    assert all(timeline.boundary_weight(i) == 1 for i in range(12, 22))
+    assert timeline.boundary_weight(33) == 1  # End not yet known.
+    timeline.finish()
+    assert timeline.boundary_weight(22) == 1
+    assert timeline.boundary_weight(33) == 0
+    assert all(timeline.boundary_weight(i) >= timeline.boundary_weight(i+1) for i in range(22,33))
+    class Stitch:
+        idx = 46  # 13 preroll + final visible frame 33
+        def __call__(self, source, driving, **kwargs):
+            return source, driving
+    wrapper = BlinkAwareMotionStitch(Stitch())
+    wrapper.set_boundary_timeline(timeline, 13)
+    source = np.zeros((1,21,3), np.float32)
+    driving = np.ones_like(source)
+    assert np.array_equal(wrapper(source, driving)[1], source)
+
+
+def test_native_motion_defaults_and_original_idle_are_restored():
+    import inspect
+    from app.main import DittoLiveRuntime, DittoRealtimeRuntime, IDLE_ASSET_VERSION, build_idle_ctrl_info, DITTO_TURN_TAIL_FRAMES
+    # Do not regress into expression-only head locking in either setup path.
+    assert 'use_d_keys=' not in inspect.getsource(DittoLiveRuntime._generate_idle_blocking)
+    assert 'use_d_keys=' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
+    assert 'set_boundary_timeline(' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
+    assert IDLE_ASSET_VERSION == 6
+    assert DITTO_TURN_TAIL_FRAMES == 12
+    for variant in range(3):
+        controls=build_idle_ctrl_info(variant,400)
+        assert controls[40]['boundary_alpha'] == 1
+        assert controls[0]['boundary_alpha'] == controls[399]['boundary_alpha'] == 0
+        if variant == 2:
+            assert max(abs(c['delta_pitch']) for c in controls.values()) > 1
+
+
+def test_direct_handoff_keeps_expression_through_last_native_frame():
+    controls = build_ditto_ctrl_info(MotionPlan(expression='happy', intensity=1), 60, hold_expression_end=True)
+    assert np.array_equal(controls[30]['delta_exp'], controls[59]['delta_exp'])

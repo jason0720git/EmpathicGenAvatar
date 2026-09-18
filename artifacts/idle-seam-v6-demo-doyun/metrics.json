@@ -1,0 +1,59 @@
+[
+  {
+    "variant": 0,
+    "revisions": {
+      "5": {
+        "frames": 200,
+        "duration_s": 8.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.2541363466469397,
+        "next_step_mae": 0.24304909352591184
+      },
+      "6": {
+        "frames": 400,
+        "duration_s": 16.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.21947984871255172,
+        "next_step_mae": 0.22085692342150426
+      }
+    }
+  },
+  {
+    "variant": 1,
+    "revisions": {
+      "5": {
+        "frames": 200,
+        "duration_s": 8.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.24941726918101148,
+        "next_step_mae": 0.2494511837967271
+      },
+      "6": {
+        "frames": 400,
+        "duration_s": 16.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.21874573859320762,
+        "next_step_mae": 0.22135504433982728
+      }
+    }
+  },
+  {
+    "variant": 2,
+    "revisions": {
+      "5": {
+        "frames": 200,
+        "duration_s": 8.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.25510997873977526,
+        "next_step_mae": 0.24784447887720013
+      },
+      "6": {
+        "frames": 400,
+        "duration_s": 16.0,
+        "seam_mae": 0.0,
+        "previous_step_mae": 0.223222467867668,
+        "next_step_mae": 0.21835925328494848
+      }
+    }
+  }
+]

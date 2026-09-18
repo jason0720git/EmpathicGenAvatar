@@ -4,6 +4,8 @@ import asyncio
 import json
 import mimetypes
 import secrets
+import shutil
+import hashlib
 import threading
 import time
 import uuid
@@ -20,7 +22,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 import httpx
 
 from .behavior import BehaviorDecision, BehaviorPlanner
-from .conversation import ConversationProvider, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
+from .conversation import ConversationProvider, ConversationResponse, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
 from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn, ExpressionFeedbackIn
 from .quality import ImageValidationError, inspect_image
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
@@ -30,6 +32,7 @@ from .store import Store
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     config = settings or Settings.from_env()
+    test_wav = config.data_dir / "test-audio" / "reference.wav"
     store = Store(config.database_path)
     renderer: AvatarRenderer = RemoteRenderer(config.avatar_renderer_url, config.worker_shared_token) if config.avatar_engine == "remote" and config.avatar_renderer_url else PreviewRenderer()
     fast_renderer: AvatarRenderer | None = RemoteRenderer(
@@ -107,6 +110,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         upload_dir.mkdir(parents=True, exist_ok=True)
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
         store.initialize()
+        bundled_wav = Path(__file__).parent / "assets" / "test-reference.wav"
+        if bundled_wav.is_file() and not test_wav.is_file():
+            test_wav.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(bundled_wav, test_wav)
         yield
 
     app = FastAPI(title="Empathic Avatar Control API", version="0.1.0", lifespan=lifespan)
@@ -359,8 +366,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             source_path.unlink()
         return Response(status_code=204)
 
+    @app.get("/api/test-audio")
+    async def test_audio_asset() -> FileResponse:
+        if not test_wav.is_file():
+            raise HTTPException(status_code=404, detail="테스트 WAV 파일을 찾을 수 없습니다.")
+        return FileResponse(test_wav, media_type="audio/wav", headers={"Cache-Control":"no-store"})
+
     @app.post("/api/live/sessions", response_model=SessionOut, status_code=201)
     async def create_session(body: CreateSessionIn) -> SessionOut:
+        if body.mode == "wav_test" and not test_wav.is_file():
+            raise HTTPException(status_code=503, detail="테스트 WAV 파일을 찾을 수 없습니다.")
         avatar = _avatar_or_404(store, body.avatar_id)
         if avatar.status != "ready":
             raise HTTPException(status_code=409, detail="아바타 준비가 끝난 뒤 대화를 시작할 수 있습니다.")
@@ -377,9 +392,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     label = "Ditto Realtime TensorRT 10" if body.renderer_method == "ditto_realtime_trt10" else "Ditto Realtime Fast Lane" if body.renderer_method == "ditto_realtime_fast" else "Ditto Realtime" if body.renderer_method == "ditto_realtime" else "Fast Live" if body.renderer_method == "fast" else "Ditto Default"
                     raise HTTPException(status_code=502, detail=f"{label} GPU 아바타 준비에 실패했습니다.") from error
         instruction = body.session_instruction.strip() if body.session_instruction else None
-        session = store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method, instruction)
+        session = store.create_session(str(uuid.uuid4()), avatar.id, body.renderer_method, instruction, mode=body.mode)
         try:
-            await conversation.start_session(session.id, persona=avatar.persona, session_instruction=instruction)
+            if session.mode == "realtime":
+                await conversation.start_session(session.id, persona=avatar.persona, session_instruction=instruction, voice=avatar.voice)
         except Exception as error:
             store.end_session(session.id)
             raise HTTPException(status_code=502, detail="OpenAI Realtime 세션 연결에 실패했습니다.") from error
@@ -395,7 +411,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
         conversation_started_at = time.perf_counter()
-        conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override)
+        if session.mode == "wav_test":
+            if body.affect_override is None:
+                raise HTTPException(status_code=422, detail="WAV 테스트에서는 감정을 직접 선택해 주세요.")
+            if not test_wav.is_file():
+                raise HTTPException(status_code=503, detail="테스트 WAV 파일을 찾을 수 없습니다.")
+            conversation_response = ConversationResponse(text="고정 WAV 표정 테스트", audio_path=str(test_wav), audio_streaming=False, affect=body.affect_override)
+        else:
+            await conversation.start_session(session_id, persona=avatar.persona, session_instruction=session.session_instruction, voice=avatar.voice)
+            conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override)
         conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
@@ -417,6 +441,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             conversation_elapsed_ms=conversation_elapsed_ms,
         )
         record_empathic_debug("behavior.decision", debug_payload)
+        if session.mode == "wav_test":
+            record_empathic_debug("wav_test.input", {"session_id":session_id, "turn_id":turn_id, "sha256":hashlib.sha256(test_wav.read_bytes()).hexdigest(), "audio_path":str(test_wav), "realtime_api_called":False})
         render_started_at = time.perf_counter()
         try:
             visemes, renderer_out = await selected_renderer.render(
@@ -445,7 +471,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/live/sessions/{session_id}/turns/{turn_id}/caption")
     async def get_turn_caption(session_id: str, turn_id: str) -> dict[str, str | bool | None]:
-        _session_or_404(store, session_id)
+        session = _session_or_404(store, session_id)
+        if session.mode == "wav_test":
+            return {"text": "고정 WAV 표정 테스트", "done": True}
         caption = conversation.caption_status(session_id, turn_id)
         if caption is None:
             return {"text": None, "done": False}
@@ -489,6 +517,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except HTTPException:
             await websocket.close(code=4404)
             return
+        if session.mode == "wav_test":
+            await websocket.close(code=4403)
+            return
         await websocket.accept()
         await websocket.send_json({"type": "room.state", "state": "ready", "session_id": session.id})
         try:
@@ -522,6 +553,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 store.set_active_turn(session_id, turn_id)
                 await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
                 conversation_started_at = time.perf_counter()
+                await conversation.start_session(session_id, persona=avatar.persona, session_instruction=session.session_instruction, voice=avatar.voice)
                 answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=turn_body.affect_override)
                 conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
                 if not store.is_active_turn(session_id, turn_id):

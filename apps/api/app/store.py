@@ -80,6 +80,8 @@ class Store:
                 connection.execute("ALTER TABLE sessions ADD COLUMN renderer_method TEXT NOT NULL DEFAULT 'ditto'")
             if "session_instruction" not in columns:
                 connection.execute("ALTER TABLE sessions ADD COLUMN session_instruction TEXT")
+            if "mode" not in columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'realtime'")
         self._ensure_demo_avatar()
 
     def _ensure_demo_avatar(self) -> None:
@@ -99,10 +101,12 @@ class Store:
                        (id,name,persona,voice,status,source_path,created_at,engine,quality_json)
                        VALUES(?,?,?,?,?,?,?,?,?)""",
                     (
-                        avatar_id, name, persona, "Calm Korean", "ready", str(source_path), now,
+                        avatar_id, name, persona, "echo" if avatar_id == "demo-doyun" else "Calm Korean", "ready", str(source_path), now,
                         "remote", quality.model_dump_json(),
                     ),
                 )
+            # Migrate the existing bundled Doyun as well as fresh installations.
+            connection.execute("UPDATE avatars SET voice = 'echo' WHERE id = 'demo-doyun'")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, check_same_thread=False)
@@ -182,19 +186,19 @@ class Store:
             raise KeyError("avatar not found")
         return source_path
 
-    def create_session(self, session_id: str, avatar_id: str, renderer_method: str = "ditto", session_instruction: str | None = None) -> SessionOut:
+    def create_session(self, session_id: str, avatar_id: str, renderer_method: str = "ditto", session_instruction: str | None = None, mode: str = "realtime") -> SessionOut:
         self.get_avatar(avatar_id)
         now = _now()
         with self._lock, self._connect() as connection:
-            connection.execute("INSERT INTO sessions(id,avatar_id,state,created_at,renderer_method,session_instruction) VALUES(?,?,?,?,?,?)", (session_id, avatar_id, "active", now, renderer_method, session_instruction))
-        return SessionOut(id=session_id, avatar_id=avatar_id, state="active", created_at=now, renderer_method=renderer_method, session_instruction=session_instruction)
+            connection.execute("INSERT INTO sessions(id,avatar_id,state,created_at,renderer_method,session_instruction,mode) VALUES(?,?,?,?,?,?,?)", (session_id, avatar_id, "active", now, renderer_method, session_instruction, mode))
+        return SessionOut(id=session_id, avatar_id=avatar_id, state="active", created_at=now, renderer_method=renderer_method, session_instruction=session_instruction, mode=mode)
 
     def get_session(self, session_id: str) -> SessionOut:
         with self._lock, self._connect() as connection:
-            row = connection.execute("SELECT id, avatar_id, state, created_at, renderer_method, session_instruction FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            row = connection.execute("SELECT id, avatar_id, state, created_at, renderer_method, session_instruction, mode FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             raise KeyError("session not found")
-        return SessionOut(id=row["id"], avatar_id=row["avatar_id"], state=row["state"], created_at=row["created_at"], renderer_method=row["renderer_method"], session_instruction=row["session_instruction"])
+        return SessionOut(id=row["id"], avatar_id=row["avatar_id"], state=row["state"], created_at=row["created_at"], renderer_method=row["renderer_method"], session_instruction=row["session_instruction"], mode=row["mode"])
 
     def set_active_turn(self, session_id: str, turn_id: str | None) -> None:
         with self._lock, self._connect() as connection:

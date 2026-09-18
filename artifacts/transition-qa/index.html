@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>Face-local handoff QA</title>
+<style>body{background:#182034;color:white;font:15px sans-serif}section{display:flex;flex-wrap:wrap;gap:8px}figure{margin:0}canvas{width:230px}pre{white-space:pre-wrap}</style>
+<h1>Face-local handoff QA — actual renderer</h1><pre id="result">Loading</pre><section id="frames"></section>
+<script type="module">
+import {beginIdleEntryTransition,drawTransition} from './transition.js';
+const load=src=>new Promise((resolve,reject)=>{const i=new Image;i.onload=()=>resolve(i);i.onerror=reject;i.src=src});
+const [idleImage,incoming]=await Promise.all([load('./idle.jpg'),load('./incoming.jpg')]);
+const idle=document.createElement('canvas');idle.width=idleImage.width;idle.height=idleImage.height;idle.getContext('2d').drawImage(idleImage,0,0);
+const transition=beginIdleEntryTransition(idle,0,incoming);
+const frames=document.querySelector('#frames'), snapshots=[];
+for(const time of [-1,0,80,160,240,360,480]){
+ const figure=document.createElement('figure'),canvas=document.createElement('canvas');canvas.width=idle.width;canvas.height=idle.height;
+ const ctx=canvas.getContext('2d');
+ if(time<0)ctx.drawImage(incoming,0,0);else drawTransition(ctx,incoming,transition,time);
+ const caption=document.createElement('figcaption');caption.textContent=time<0?'Native first speech frame':`${time}ms`;
+ figure.append(canvas,caption);frames.append(figure);snapshots.push(ctx.getImageData(0,0,canvas.width,canvas.height).data);
+}
+let endMax=0;for(let i=0;i<snapshots[0].length;i++)endMax=Math.max(endMax,Math.abs(snapshots[0][i]-snapshots.at(-1)[i]));
+document.querySelector('#result').textContent=JSON.stringify({accepted:transition.accepted,dx:transition.dx,dy:transition.dy,improvement:transition.improvement,postLeadMaxPixelDifference:endMax},null,2);
+</script>
