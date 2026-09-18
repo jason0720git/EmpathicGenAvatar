@@ -115,7 +115,7 @@ it('keeps idle live during entry and only permits local face correction', async 
   await act(async()=>vi.advanceTimersByTimeAsync(250))
   expect(host.querySelector('.rendered-avatar-video')?.classList.contains('visible')).toBe(true)
   expect(idle.dataset.parked).toBe('false')
-  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'idle_to_speech',strategy:'direct_live_handoff_v12',full_frame_transform:false,live_idle:true,source_anchor:false})}))
+  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'idle_to_speech',strategy:'geometry_handoff_v13',full_frame_transform:false,live_idle:true,source_anchor:false,rgb_crossfade:false})}))
   clock=.7
   await act(async()=>vi.advanceTimersByTimeAsync(550))
   await act(async()=>vi.advanceTimersByTimeAsync(50))

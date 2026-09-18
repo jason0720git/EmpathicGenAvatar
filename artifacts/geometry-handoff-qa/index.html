@@ -1,0 +1,24 @@
+<!doctype html><meta charset="utf-8"><title>Geometry handoff validation</title>
+<style>body{background:#172031;color:white;font:14px sans-serif}section{display:flex;gap:8px;flex-wrap:wrap}canvas{width:180px}figure{margin:0}pre{white-space:pre-wrap}</style>
+<h1>Actual talk → idle: dissolve versus single-texture geometry</h1><pre id="stats">Loading</pre><h2>Old dissolve</h2><section id="old"></section><h2>Geometry (no opacity blend)</h2><section id="new"></section>
+<script type="module">
+import {GeometryHandoff,warmGeometryHandoff} from './geometry.js';
+const load=src=>new Promise((resolve,reject)=>{const i=new Image;i.onload=()=>resolve(i);i.onerror=reject;i.src=src});
+try {
+const [a,b]=await Promise.all([load('./talk.jpg'),load('./idle.jpg')]);
+const warm=document.createElement('canvas');warm.width=a.width;warm.height=a.height;warm.getContext('2d').drawImage(a,0,0);warmGeometryHandoff(warm);
+const warp=new GeometryHandoff(),times=[0,.2,.4,.5,.6,.8,1];
+const scores={old:[],geometry:[]};
+for(const mode of ['old','new'])for(const t of times){
+ const c=document.createElement('canvas');c.width=a.width;c.height=a.height;const ctx=c.getContext('2d');
+ if(mode==='old'){ctx.drawImage(a,0,0);ctx.globalAlpha=t;ctx.drawImage(b,0,0);ctx.globalAlpha=1}else warp.draw(ctx,a,b,t);
+ const f=document.createElement('figure'),label=document.createElement('figcaption');label.textContent=`${t*100}%`;f.append(c,label);document.querySelector('#'+mode).append(f);
+ const p=ctx.getImageData(0,0,c.width,c.height).data;let sum=0,n=0;
+ for(let y=Math.floor(c.height*.2);y<c.height*.65;y++)for(let x=Math.floor(c.width*.25);x<c.width*.75;x++){
+  const k=(y*c.width+x)*4;for(let ch=0;ch<3;ch++){const v=4*p[k+ch]-p[k+ch-4]-p[k+ch+4]-p[k+ch-c.width*4]-p[k+ch+c.width*4];sum+=v*v;n++}
+ }
+ scores[mode==='old'?'old':'geometry'].push(Math.round(sum/n));
+}
+document.querySelector('#stats').textContent=JSON.stringify({stats:warp.stats,sharpness:scores},null,2);
+}catch(e){document.querySelector('#stats').textContent=String(e)}
+</script>

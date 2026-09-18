@@ -1,4 +1,5 @@
 import { drawFaceRegistration } from './faceTransitionMesh'
+import { GeometryHandoff } from './geometryHandoff'
 // Small, bounded 2D registration, not anatomical pose estimation or optical flow.
 // Match upper-face luminance; avoid the speech-driven mouth. No network/models.
 export const TRANSITION_MS = 480
@@ -7,12 +8,9 @@ export const MIX_MS = 160
 export const ENTRY_MIX_MS = 480
 // Called after painting the current native speech frame. The last of 12
 // silent-tail frames is fully idle, so hiding the speech canvas is continuous.
-export function drawLiveExit(ctx:CanvasRenderingContext2D,idle:CanvasImageSource,ptsMs:number,startMs:number) {
+export function drawLiveExit(ctx:CanvasRenderingContext2D,idle:CanvasImageSource,ptsMs:number,startMs:number,source:CanvasImageSource=ctx.canvas,handoff=new GeometryHandoff()) {
   const alpha=ease((ptsMs-startMs)/440)
-  if(alpha>0) {
-    ctx.save();ctx.globalAlpha=alpha
-    ctx.drawImage(idle,0,0,ctx.canvas.width,ctx.canvas.height);ctx.restore()
-  }
+  if(alpha>0) handoff.draw(ctx,source,idle,alpha)
   return alpha>=1
 }
 export function ease(value: number) {
@@ -58,17 +56,11 @@ function sample(source: CanvasImageSource) {
   for(let i=0;i<gray.length;i++) gray[i]=rgba[i*4]*.299+rgba[i*4+1]*.587+rgba[i*4+2]*.114
   return gray
 }
-export type AvatarTransition = {from:HTMLCanvasElement; dx:number; dy:number; angle?:number; scale?:number; started:number; accepted:boolean; improvement:number; mixMs?:number; faceLocal?:boolean}
-export function beginIdleEntryTransition(idle:HTMLCanvasElement,mediaStartMs:number,incoming?:CanvasImageSource):AvatarTransition {
-  // Deliberately keep the live idle canvas, not a frozen screenshot. Its
-  // decoder must not park until this blend completes. Never move the image.
-  let shift={dx:0,dy:0,accepted:false,improvement:0}
-  try {
-    if(incoming) shift=estimateShift(sample(idle),sample(incoming),96,120)
-  } catch { /* Unavailable frame: appearance-only fallback, no camera movement. */ }
-  // Reject large pose mismatches rather than stretching a face to fit them.
-  if(Math.abs(shift.dx)>.02 || Math.abs(shift.dy)>.02) shift={...shift,dx:0,dy:0,accepted:false}
-  return {from:idle,...shift,angle:0,scale:1,started:mediaStartMs,mixMs:ENTRY_MIX_MS,faceLocal:true}
+export type AvatarTransition = {from:HTMLCanvasElement; dx:number; dy:number; angle?:number; scale?:number; started:number; accepted:boolean; improvement:number; mixMs?:number; faceLocal?:boolean; geometry?:GeometryHandoff}
+export function beginIdleEntryTransition(idle:HTMLCanvasElement,mediaStartMs:number,_incoming?:CanvasImageSource):AvatarTransition {
+  // Keep live idle and estimate LOCAL geometry anew for each pair, not one
+  // global translation from an increasingly stale initial screenshot.
+  return {from:idle,dx:0,dy:0,accepted:false,improvement:0,angle:0,scale:1,started:mediaStartMs,mixMs:ENTRY_MIX_MS,faceLocal:true,geometry:new GeometryHandoff()}
 }
 export function beginTransition(from:CanvasImageSource,to:CanvasImageSource,w:number,h:number,now:number,register=true):AvatarTransition|null {
   try {
@@ -79,6 +71,10 @@ export function beginTransition(from:CanvasImageSource,to:CanvasImageSource,w:nu
 }
 export function drawTransition(ctx:CanvasRenderingContext2D,to:CanvasImageSource,transition:AvatarTransition|null,now:number) {
   const w=ctx.canvas.width,h=ctx.canvas.height
+  if(transition?.geometry) {
+    transition.geometry.draw(ctx,transition.from,to,ease((now-transition.started)/(transition.mixMs??TRANSITION_MS)))
+    return
+  }
   ctx.drawImage(to,0,0,w,h)
   if(!transition) return
   const elapsed=Math.max(0,now-transition.started)

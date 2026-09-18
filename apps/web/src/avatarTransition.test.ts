@@ -1,21 +1,24 @@
 import { expect, it, vi } from 'vitest'
 import { beginIdleEntryTransition, beginTransition, ease, estimateShift, drawTransition, drawLiveExit, ENTRY_MIX_MS, MIX_MS, TRANSITION_MS } from './avatarTransition'
+import { GeometryHandoff } from './geometryHandoff'
 
 it('blends directly into live idle during the silent tail without a source portrait', () => {
   const idle=document.createElement('canvas')
   for (const t of [0,40,220,400,440,480]) {
+    const h=new GeometryHandoff(),draw=vi.spyOn(h,'draw').mockImplementation(()=>{})
     const ctx={canvas:{width:96,height:120},drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),globalAlpha:1}
-    expect(drawLiveExit(ctx as unknown as CanvasRenderingContext2D,idle,1000+t,1000)).toBe(t>=440)
+    expect(drawLiveExit(ctx as unknown as CanvasRenderingContext2D,idle,1000+t,1000,idle,h)).toBe(t>=440)
     if(t>0) {
-      expect(ctx.drawImage).toHaveBeenCalledExactlyOnceWith(idle,0,0,96,120)
-      expect(ctx.globalAlpha).toBeCloseTo(ease(t/440))
-    } else expect(ctx.drawImage).not.toHaveBeenCalled()
+      expect(draw).toHaveBeenCalledExactlyOnceWith(ctx,idle,idle,ease(t/440))
+      expect(ctx.globalAlpha).toBe(1)
+    } else expect(draw).not.toHaveBeenCalled()
   }
 })
 
-it('blends a LIVE idle canvas without moving the frame and finishes before speech', () => {
+it('passes LIVE sources to a geometry-only handoff and finishes before speech', () => {
   const idle=document.createElement('canvas'),incoming=document.createElement('canvas')
   const transition=beginIdleEntryTransition(idle,1000)
+  const draw=vi.spyOn(transition.geometry!,'draw').mockImplementation(()=>{})
   expect(transition.from).toBe(idle)
   for(const elapsed of [0,160,240,440,480,520]) {
     const ctx={canvas:{width:96,height:120},drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),translate:vi.fn(),rotate:vi.fn(),scale:vi.fn(),globalAlpha:1}
@@ -23,12 +26,8 @@ it('blends a LIVE idle canvas without moving the frame and finishes before speec
     expect(ctx.translate).not.toHaveBeenCalled()
     expect(ctx.rotate).not.toHaveBeenCalled()
     expect(ctx.scale).not.toHaveBeenCalled()
-    if(elapsed<ENTRY_MIX_MS) {
-      expect(ctx.drawImage).toHaveBeenLastCalledWith(idle,0,0,96,120)
-      expect(ctx.globalAlpha).toBeCloseTo(1-ease(elapsed/ENTRY_MIX_MS))
-    } else {
-      expect(ctx.drawImage).toHaveBeenCalledExactlyOnceWith(incoming,0,0,96,120)
-    }
+    expect(draw).toHaveBeenLastCalledWith(ctx,idle,incoming,ease(elapsed/ENTRY_MIX_MS))
+    expect(ctx.globalAlpha).toBe(1)
   }
 })
 
