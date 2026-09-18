@@ -110,21 +110,21 @@ it('keeps idle live during entry and only permits local face correction', async 
   const idle=host.querySelector<HTMLCanvasElement>('.idle-avatar-video')!
   expect(idle.dataset.parked).toBe('false')
   await send()
-  await act(async()=>{socket.onopen?.();packet(2,0);packet(1,480);packet(2,480)})
+  await act(async()=>{socket.onopen?.();packet(2,0);packet(1,1000);packet(2,1000)})
   clock=.21
   await act(async()=>vi.advanceTimersByTimeAsync(250))
   expect(host.querySelector('.rendered-avatar-video')?.classList.contains('visible')).toBe(true)
   expect(idle.dataset.parked).toBe('false')
-  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'idle_to_speech',strategy:'geometry_handoff_v13',full_frame_transform:false,live_idle:true,source_anchor:false,rgb_crossfade:false})}))
-  clock=.7
+  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'idle_to_speech',strategy:'continuous_geometry_v14',full_frame_transform:false,live_idle:true,source_anchor:false,aligned_texture_blend:true})}))
+  clock=1.22
   await act(async()=>vi.advanceTimersByTimeAsync(550))
   await act(async()=>vi.advanceTimersByTimeAsync(50))
   expect(idle.dataset.parked).toBe('false')
-  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({phase:'completed',pts_ms:480})}))
-  await act(async()=>{packet(2,560);packet(2,1000);packet(3,0)})
-  clock=.77
+  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({phase:'completed',pts_ms:1000})}))
+  await act(async()=>{packet(2,1040);packet(2,2000);packet(3,0)})
+  clock=1.25
   await act(async()=>vi.advanceTimersByTimeAsync(80))
-  clock=1.3
+  clock=2.3
   await act(async()=>vi.advanceTimersByTimeAsync(650))
   expect(idle.dataset.parked).toBe('false')
   expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'speech_to_idle',phase:'completed',live_tail_completed:true,fallback:false,source_anchor:false})}))

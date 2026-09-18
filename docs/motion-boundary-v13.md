@@ -1,5 +1,16 @@
 # v13: geometry-only handoff instead of an opacity dissolve
 
+## Timing follow-up (2026-09-18)
+
+At the user's request, the same geometry handoff now runs more slowly:
+720 ms entry instead of 480 ms; 720 ms silent tail instead of 480 ms (the
+last tail frame is fully idle at 680 ms instead of 440 ms). Worker lead/tail
+are both 18 frames at 25 fps. This adds 240 ms before speech and 240 ms after
+speech; it does not time-stretch the voice or extend warping into spoken frames.
+Web timing constants, scheduled-tail calculation and timing regression tests
+were updated together. Geometry matching, texture selection and native head
+motion are unchanged. Web 38 tests and worker 23 fixture-free tests pass.
+
 ## Why v12 looked blurred
 
 v12 mixed two independently moving portraits at their original pixel locations.

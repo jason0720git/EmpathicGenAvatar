@@ -255,8 +255,10 @@ IDLE_FPS = 25
 IDLE_FRAME_COUNT = 400  # 16 seconds, not a slowed-down 8-second clip
 # Real talking turns reserve a small silent motion bridge at each edge. The
 # browser receives these frames, but never receives silent PCM for the lead.
-DITTO_TURN_LEAD_FRAMES = 12
-DITTO_TURN_TAIL_FRAMES = 12
+# 1000 ms at 25 fps; match browser ENTRY_MIX_MS / EXIT_TAIL_MS.
+# Extra silence gives geometry time to settle without touching spoken frames.
+DITTO_TURN_LEAD_FRAMES = 25
+DITTO_TURN_TAIL_FRAMES = 25
 
 
 def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0, hold_expression_end: bool = False) -> dict[int, dict[str, float | np.ndarray]]:

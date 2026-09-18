@@ -1,15 +1,17 @@
 import { expect, it, vi } from 'vitest'
-import { beginIdleEntryTransition, beginTransition, ease, estimateShift, drawTransition, drawLiveExit, ENTRY_MIX_MS, MIX_MS, TRANSITION_MS } from './avatarTransition'
+import { beginIdleEntryTransition, beginTransition, ease, estimateShift, drawTransition, drawLiveExit, ENTRY_MIX_MS, EXIT_MORPH_MS, EXIT_TAIL_MS, MIX_MS, TRANSITION_MS } from './avatarTransition'
 import { GeometryHandoff } from './geometryHandoff'
 
 it('blends directly into live idle during the silent tail without a source portrait', () => {
   const idle=document.createElement('canvas')
-  for (const t of [0,40,220,400,440,480]) {
+  expect(ENTRY_MIX_MS).toBe(1000)
+  expect(EXIT_TAIL_MS).toBe(1000)
+  for (const t of [0,40,480,720,920,960,1000]) {
     const h=new GeometryHandoff(),draw=vi.spyOn(h,'draw').mockImplementation(()=>{})
     const ctx={canvas:{width:96,height:120},drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),globalAlpha:1}
-    expect(drawLiveExit(ctx as unknown as CanvasRenderingContext2D,idle,1000+t,1000,idle,h)).toBe(t>=440)
+    expect(drawLiveExit(ctx as unknown as CanvasRenderingContext2D,idle,1000+t,1000,idle,h)).toBe(t>=EXIT_MORPH_MS)
     if(t>0) {
-      expect(draw).toHaveBeenCalledExactlyOnceWith(ctx,idle,idle,ease(t/440))
+      expect(draw).toHaveBeenCalledExactlyOnceWith(ctx,idle,idle,ease(t/EXIT_MORPH_MS))
       expect(ctx.globalAlpha).toBe(1)
     } else expect(draw).not.toHaveBeenCalled()
   }

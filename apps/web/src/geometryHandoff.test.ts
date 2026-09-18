@@ -1,5 +1,5 @@
 import {expect,it,vi} from 'vitest'
-import {FLOW_W as W,FLOW_H as H,GRID_W,GRID_H,matchGeometry,boundFlow,GeometryHandoff,HANDOFF_FRAGMENT} from './geometryHandoff'
+import {FLOW_W as W,FLOW_H as H,GRID_W,GRID_H,matchGeometry,boundFlow,smoothFlow,appearanceWeight,GeometryHandoff,HANDOFF_FRAGMENT} from './geometryHandoff'
 
 it('does not hallucinate motion for identical or untextured inputs',()=>{
   const a=new Float32Array(W*H).fill(90)
@@ -33,18 +33,27 @@ it('preserves exact input endpoints and does not change canvas opacity',()=>{
   expect(ctx.drawImage).toHaveBeenLastCalledWith(b,0,0,100,120)
   expect(ctx.globalAlpha).toBe(1)
 })
-it('has no two-frame opacity mixture in the GPU shader',()=>{
-  expect(HANDOFF_FRAGMENT).not.toContain('mix(')
-  expect(HANDOFF_FRAGMENT).toContain('if(progress<0.5)')
+it('has continuous aligned appearance transfer, not a midpoint texture cut',()=>{
+  expect(HANDOFF_FRAGMENT).not.toContain('if(progress<0.5)')
+  expect(HANDOFF_FRAGMENT).toContain('smoothstep(0.2,0.8,progress)')
+  expect(HANDOFF_FRAGMENT).toContain('uv+(1.0-progress)*movement')
+  expect(appearanceWeight(.5)).toBeCloseTo(.5)
+  expect(appearanceWeight(.50001)-appearanceWeight(.49999)).toBeLessThan(.0001)
+  expect(appearanceWeight(0)).toBe(0);expect(appearanceWeight(1)).toBe(1)
   expect(HANDOFF_FRAGMENT).toContain('vec4(color.rgb,1.0)')
 })
-it('logs a sharp source-switch fallback instead of ghosting when GPU/readback fails',()=>{
+it('limits frame-to-frame correspondence changes without changing native motion',()=>{
+  const previous=new Float32Array(GRID_W*GRID_H*2)
+  const result=smoothFlow(new Float32Array(previous.length).fill(7),previous)
+  expect(Math.max(...result)).toBeLessThan(.351)
+})
+it('logs a continuous degraded fallback when GPU/readback fails',()=>{
   const spy=vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue(null)
   try {
     const h=new GeometryHandoff(),a={} as HTMLCanvasElement,b={} as HTMLCanvasElement
-    const ctx={canvas:{width:100,height:120},drawImage:vi.fn(),globalAlpha:1}
+    const ctx={canvas:{width:100,height:120},drawImage:vi.fn(),save:vi.fn(),restore:vi.fn(),globalAlpha:1}
     h.draw(ctx as unknown as CanvasRenderingContext2D,a,b,.7)
-    expect(ctx.drawImage).toHaveBeenCalledExactlyOnceWith(b,0,0,100,120)
-    expect(h.stats.mode).toBe('unwarped_switch');expect(ctx.globalAlpha).toBe(1)
+    expect(ctx.drawImage).toHaveBeenLastCalledWith(b,0,0,100,120)
+    expect(h.stats.mode).toBe('unregistered_blend_fallback');expect(ctx.globalAlpha).toBeCloseTo(appearanceWeight(.7))
   }finally{spy.mockRestore()}
 })

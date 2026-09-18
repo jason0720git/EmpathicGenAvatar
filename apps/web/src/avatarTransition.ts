@@ -2,14 +2,17 @@ import { drawFaceRegistration } from './faceTransitionMesh'
 import { GeometryHandoff } from './geometryHandoff'
 // Small, bounded 2D registration, not anatomical pose estimation or optical flow.
 // Match upper-face luminance; avoid the speech-driven mouth. No network/models.
-export const TRANSITION_MS = 480
+export const TRANSITION_MS = 1000
 export const MIX_MS = 160
 // Only the existing silent lead is corrected. Do not damp native motion.
-export const ENTRY_MIX_MS = 480
-// Called after painting the current native speech frame. The last of 12
+export const ENTRY_MIX_MS = 1000
+export const EXIT_TAIL_MS = 1000
+export const EXIT_MORPH_MS = EXIT_TAIL_MS - 40
+// Keep in sync with the worker's 25-frame, 25-fps silent lead/tail.
+// Called after painting the current native speech frame. The last of 25
 // silent-tail frames is fully idle, so hiding the speech canvas is continuous.
 export function drawLiveExit(ctx:CanvasRenderingContext2D,idle:CanvasImageSource,ptsMs:number,startMs:number,source:CanvasImageSource=ctx.canvas,handoff=new GeometryHandoff()) {
-  const alpha=ease((ptsMs-startMs)/440)
+  const alpha=ease((ptsMs-startMs)/EXIT_MORPH_MS)
   if(alpha>0) handoff.draw(ctx,source,idle,alpha)
   return alpha>=1
 }

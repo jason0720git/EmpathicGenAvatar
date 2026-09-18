@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>Midpoint continuity regression</title>
+<style>body{background:#172031;color:white;font:14px sans-serif}section{display:flex;gap:12px}canvas{width:240px}figure{margin:0}pre{white-space:pre-wrap}</style>
+<h1>Real Happy → idle: midpoint continuity</h1><pre id="stats">Loading</pre>
+<h2>Previous hard switch: immediately before / after midpoint</h2><section id="before"></section>
+<h2>Continuous aligned transfer: immediately before / after midpoint</h2><section id="after"></section>
+<script type="module">
+import {GeometryHandoff as Old,warmGeometryHandoff as warmOld} from './old-geometry.js';
+import {GeometryHandoff as New,warmGeometryHandoff as warmNew} from './continuous.js';
+const load=src=>new Promise((resolve,reject)=>{const i=new Image;i.onload=()=>resolve(i);i.onerror=reject;i.src=src});
+try {
+ const [a,b]=await Promise.all([load('./talk.jpg'),load('./idle.jpg')]);
+ const warm=document.createElement('canvas');warm.width=a.width;warm.height=a.height;warm.getContext('2d').drawImage(a,0,0);warmOld(warm);warmNew(warm);
+ const results={};
+ for(const [name,Type] of [['before',Old],['after',New]]){
+  const images=[];let stats;
+  for(const t of [.4999,.5001]){
+   const c=document.createElement('canvas');c.width=a.width;c.height=a.height;
+   const ctx=c.getContext('2d'),warp=new Type();warp.draw(ctx,a,b,t);stats=warp.stats;
+   const f=document.createElement('figure'),label=document.createElement('figcaption');label.textContent=`progress=${t}`;f.append(c,label);document.querySelector('#'+name).append(f);
+   images.push(ctx.getImageData(0,0,c.width,c.height).data);
+  }
+  let diff=0,n=0;for(let y=Math.floor(a.height*.2);y<a.height*.65;y++)for(let x=Math.floor(a.width*.25);x<a.width*.75;x++)for(let ch=0;ch<3;ch++){
+   const k=(y*a.width+x)*4+ch;diff+=Math.abs(images[0][k]-images[1][k]);n++;
+  }
+  results[name]={midpoint_mae:diff/n,stats};
+ }
+ document.querySelector('#stats').textContent=JSON.stringify(results,null,2);
+}catch(e){document.querySelector('#stats').textContent=String(e)}
+</script>

@@ -342,13 +342,13 @@ def test_speech_boundary_anchors_only_silent_frames_with_live_duration():
 
 def test_native_motion_defaults_and_original_idle_are_restored():
     import inspect
-    from app.main import DittoLiveRuntime, DittoRealtimeRuntime, IDLE_ASSET_VERSION, build_idle_ctrl_info, DITTO_TURN_TAIL_FRAMES
+    from app.main import DittoLiveRuntime, DittoRealtimeRuntime, IDLE_ASSET_VERSION, build_idle_ctrl_info, DITTO_TURN_LEAD_FRAMES, DITTO_TURN_TAIL_FRAMES
     # Do not regress into expression-only head locking in either setup path.
     assert 'use_d_keys=' not in inspect.getsource(DittoLiveRuntime._generate_idle_blocking)
     assert 'use_d_keys=' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
     assert 'set_boundary_timeline(' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
     assert IDLE_ASSET_VERSION == 6
-    assert DITTO_TURN_TAIL_FRAMES == 12
+    assert DITTO_TURN_LEAD_FRAMES == DITTO_TURN_TAIL_FRAMES == 25
     for variant in range(3):
         controls=build_idle_ctrl_info(variant,400)
         assert controls[40]['boundary_alpha'] == 1

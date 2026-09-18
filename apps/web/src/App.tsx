@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit, ENTRY_MIX_MS, TRANSITION_MS, type AvatarTransition } from './avatarTransition'
+import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit, ENTRY_MIX_MS, EXIT_TAIL_MS, TRANSITION_MS, type AvatarTransition } from './avatarTransition'
 import { GeometryHandoff, warmGeometryHandoff } from './geometryHandoff'
 import { IdleCanvas } from './IdleCanvas'
 import './rendered-video.css'
@@ -730,7 +730,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             entryTransition = method === 'ditto_realtime_trt10'
               ? beginIdleEntryTransition(idleImageRef.current,startAt*1000,bitmap)
               : beginTransition(idleImageRef.current,bitmap,canvas.width,canvas.height,context.currentTime*1000,false)
-            telemetry('visual_transition', {direction:'idle_to_speech', strategy:'geometry_handoff_v13', duration_ms:entryTransition?.mixMs ?? 160, full_frame_transform:false, live_idle:method === 'ditto_realtime_trt10', source_anchor:false, rgb_crossfade:method !== 'ditto_realtime_trt10'})
+            telemetry('visual_transition', {direction:'idle_to_speech', strategy:'continuous_geometry_v14', duration_ms:entryTransition?.mixMs ?? 160, full_frame_transform:false, live_idle:method === 'ditto_realtime_trt10', source_anchor:false, aligned_texture_blend:method === 'ditto_realtime_trt10'})
           }
           const renderStarted=performance.now()
           if (entryTransition) drawTransition(ctx,bitmap,entryTransition,context.currentTime*1000)
@@ -738,19 +738,19 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           if(!entryFinished) entryRenderPeakMs=Math.max(entryRenderPeakMs,performance.now()-renderStarted)
           if (!entryFinished && (!entryTransition || context.currentTime*1000-startAt*1000 >= ENTRY_MIX_MS)) {
             entryFinished = true
-            if(entryTransition?.geometry) telemetry('visual_transition', {phase:'geometry_metrics',direction:'idle_to_speech',...entryTransition.geometry.stats,rgb_crossfade:false})
+            if(entryTransition?.geometry) telemetry('visual_transition', {phase:'geometry_metrics',direction:'idle_to_speech',...entryTransition.geometry.stats,aligned_texture_blend:true})
             entryTransition = null
-            telemetry('visual_transition', {direction:'idle_to_speech', phase:'completed', strategy:'geometry_handoff_v13', pts_ms:ptsMs, render_peak_ms:Math.round(entryRenderPeakMs*100)/100, idle_parking_allowed:false})
+            telemetry('visual_transition', {direction:'idle_to_speech', phase:'completed', strategy:'continuous_geometry_v14', pts_ms:ptsMs, render_peak_ms:Math.round(entryRenderPeakMs*100)/100, idle_parking_allowed:false})
           }
           // The end marker fixes the actual stream duration. Mix during its
           // silent tail, while BOTH images still move; never visit a portrait.
           if (method === 'ditto_realtime_trt10' && receivedEnd && idleAvailable && idleImageRef.current) {
-            const tailStart = lastVideoPacketPts + 40 - 480
+            const tailStart = lastVideoPacketPts + 40 - EXIT_TAIL_MS
             if (ptsMs >= tailStart) {
               // If the end marker arrives late, start from zero opacity,
               // not midway through a blend (which would create another jump).
               exitStartPts ??= ptsMs
-              if (!exitStarted) telemetry('visual_transition', {direction:'speech_to_idle', strategy:'geometry_handoff_v13', pts_ms:ptsMs, tail_start_ms:tailStart, live_idle:true, source_anchor:false, rgb_crossfade:false})
+              if (!exitStarted) telemetry('visual_transition', {direction:'speech_to_idle', strategy:'continuous_geometry_v14', pts_ms:ptsMs, tail_start_ms:tailStart, live_idle:true, source_anchor:false, aligned_texture_blend:true})
               exitStarted = true
               exitCompleted = drawLiveExit(ctx,idleImageRef.current,ptsMs,exitStartPts,bitmap,exitGeometry)
             }
@@ -881,8 +881,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             // source photograph. Normally the live tail already completed.
             const exitTransition = !exitCompleted && canvas && idleAvailable && idle ? beginTransition(canvas,idle,canvas.width,canvas.height,performance.now(),false) : null
             if(exitTransition && method === 'ditto_realtime_trt10') {exitTransition.geometry=new GeometryHandoff();exitTransition.mixMs=TRANSITION_MS}
-            if(exitStarted) telemetry('visual_transition', {phase:'geometry_metrics',direction:'speech_to_idle',...exitGeometry.stats,rgb_crossfade:false})
-            telemetry('visual_transition', {direction:'speech_to_idle', phase:'completed', strategy:'geometry_handoff_v13', duration_ms:exitTransition ? TRANSITION_MS : 0, live_tail_completed:exitCompleted, fallback:!!exitTransition, source_anchor:false})
+            if(exitStarted) telemetry('visual_transition', {phase:'geometry_metrics',direction:'speech_to_idle',...exitGeometry.stats,aligned_texture_blend:true})
+            telemetry('visual_transition', {direction:'speech_to_idle', phase:'completed', strategy:'continuous_geometry_v14', duration_ms:exitTransition ? TRANSITION_MS : 0, live_tail_completed:exitCompleted, fallback:!!exitTransition, source_anchor:false})
             const handoff = () => {
               if (!isCurrent()) return
               if (ctx && idle && exitTransition) drawTransition(ctx,idle,exitTransition,performance.now())

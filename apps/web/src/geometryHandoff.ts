@@ -1,9 +1,14 @@
-// Boundary-only geometry handoff. No RGB dissolve: each output pixel comes
-// from ONE live source texture. Motion is matched at low resolution, but the
-// original-resolution texture is resampled once on the GPU.
+// Boundary-only geometry handoff. Warp both live images to the same geometry
+// BEFORE a short continuous appearance transfer. Never hard-cut at midpoint.
+// The original-resolution textures, not tracking thumbnails, are sampled.
 export const FLOW_W=128, FLOW_H=160, GRID_W=17, GRID_H=21
 const clamp=(x:number,a:number,b:number)=>Math.max(a,Math.min(b,x))
 const smooth=(x:number)=>{const t=clamp(x,0,1);return t*t*(3-2*t)}
+export const appearanceWeight=(t:number)=>smooth((t-.2)/.6)
+export function smoothFlow(current:Float32Array,previous:Float32Array) {
+  for(let i=0;i<current.length;i++)current[i]=previous[i]+clamp(.7*(current[i]-previous[i]),-.35,.35)
+  return boundFlow(current)
+}
 const at=(a:Float32Array,x:number,y:number)=>a[clamp(y,0,FLOW_H-1)*FLOW_W+clamp(x,0,FLOW_W-1)]
 
 export type FlowField={xy:Float32Array; reliable:number; residual:number; peak:number}
@@ -119,9 +124,17 @@ void main() {
   // Invert the intermediate warp with two fixed-point iterations.
   vec2 p=uv-progress*flow(uv);
   p=uv-progress*flow(p);
+  vec2 movement=flow(p);
+  // These forms are EXACT identity at their respective endpoints, even when
+  // the iterative inverse estimate has residual error.
+  vec2 fromPoint=uv-progress*movement;
+  vec2 toPoint=uv+(1.0-progress)*movement;
+  float appearance=smoothstep(0.2,0.8,progress);
   vec4 color;
-  if(progress<0.5) color=sharpSample(firstImage,clamp(p,0.0,1.0));
-  else color=sharpSample(secondImage,clamp(p+flow(p),0.0,1.0));
+  if(appearance<=0.0)color=sharpSample(firstImage,clamp(fromPoint,0.0,1.0));
+  else if(appearance>=1.0)color=sharpSample(secondImage,clamp(toPoint,0.0,1.0));
+  else color=mix(sharpSample(firstImage,clamp(fromPoint,0.0,1.0)),
+                 sharpSample(secondImage,clamp(toPoint,0.0,1.0)),appearance);
   gl_FragColor=vec4(color.rgb,1.0);
 }`
 
@@ -217,16 +230,17 @@ export class GeometryHandoff {
     try {
       const field=matchGeometry(this.sample(a),this.sample(b))
       if(field.reliable<.15 || field.residual>800)throw new Error('Unreliable frame correspondence')
-      if(this.previous)for(let i=0;i<field.xy.length;i++)field.xy[i]=.7*field.xy[i]+.3*this.previous[i]
+      if(this.previous)smoothFlow(field.xy,this.previous)
       this.previous=field.xy
       if(sharedGpu?.gl.isContextLost())sharedGpu=null
       const gpu=sharedGpu??(sharedGpu=new GpuWarp())
       ctx.drawImage(gpu.render(a,b,field.xy,t,w,h),0,0,w,h)
-      this.stats={...this.stats,mode:'single_texture_warp',reliable:field.reliable,residual:field.residual,peak_displacement:field.peak}
+      this.stats={...this.stats,mode:'aligned_continuous_warp',reliable:field.reliable,residual:field.residual,peak_displacement:field.peak}
     } catch(error) {
-      // Never silently reintroduce the ghosting dissolve. A GPU/readback
-      // failure uses an explicit, logged unwarped source switch.
-      ctx.drawImage(t<.5?a:b,0,0,w,h);this.stats.mode='unwarped_switch'
+      // Degraded GPU/readback fallback must also remain continuous, not cut
+      // at 50%. This can soften the image and is explicitly logged.
+      ctx.drawImage(a,0,0,w,h);ctx.save();ctx.globalAlpha=appearanceWeight(t)
+      ctx.drawImage(b,0,0,w,h);ctx.restore();this.stats.mode='unregistered_blend_fallback'
       this.stats.fallback_frames++;this.stats.last_error=error instanceof Error?error.message:'render_failed'
     }
     this.stats.frames++;this.stats.peak_ms=Math.max(this.stats.peak_ms,performance.now()-start)
