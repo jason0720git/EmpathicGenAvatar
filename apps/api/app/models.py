@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
+from .perception import UserObservation
 
 
 class ImageQuality(BaseModel):
@@ -48,6 +49,10 @@ class SessionOut(BaseModel):
 
 
 class TurnIn(BaseModel):
+    use_observation: bool = False
+    observation_window_ms: int = Field(default=3000,ge=200,le=120000)
+    observation_speaking: bool = False
+    observation_end_age_ms: int = Field(default=0,ge=0,le=5000)
     expression_render_mode: ExpressionRenderMode = "speech_safe"
     text: str = Field(min_length=1, max_length=4_000)
     client_turn_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -151,6 +156,7 @@ class RendererOut(BaseModel):
 
 
 class TurnOut(BaseModel):
+    user_observation: UserObservation | None = None
     turn_id: str
     assistant_text: str
     visemes: list[Viseme]
@@ -167,7 +173,7 @@ class HealthOut(BaseModel):
 class ExpressionFeedbackIn(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     turn_id: str = Field(min_length=1, max_length=128)
-    issue: Literal["good", "mouth_blur", "lip_shape", "audio_ahead", "video_ahead", "weak_expression", "no_media"]
+    issue: Literal["good", "mouth_blur", "lip_shape", "audio_ahead", "video_ahead", "weak_expression", "no_media", "wrong_observation", "missed_face", "empathy_mismatch"]
     severity: int = Field(default=2, ge=0, le=3)
     at_ms: int | None = Field(default=None, ge=0, le=300_000)
     note: str = Field(default="", max_length=1000)

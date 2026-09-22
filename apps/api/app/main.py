@@ -25,6 +25,7 @@ from .behavior import BehaviorDecision, BehaviorPlanner
 from .conversation import ConversationProvider, ConversationResponse, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
 from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn, ExpressionFeedbackIn
 from .quality import ImageValidationError, inspect_image
+from .perception import PerceptionClient
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
 from .settings import Settings
 from .store import Store
@@ -54,6 +55,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         conversation = SafeDemoConversation()
     behavior_planner = BehaviorPlanner()
+    perception = PerceptionClient(config.data_dir)
+
     upload_dir = config.data_dir / "uploads"
     telemetry_path = config.data_dir / "telemetry" / "turn-events.jsonl"
     telemetry_lock = threading.Lock()
@@ -401,6 +404,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail="OpenAI Realtime 세션 연결에 실패했습니다.") from error
         return session
 
+    @app.post("/api/live/sessions/{session_id}/perception/{action}")
+    async def perception_control(session_id: str, action: str):
+        session = _session_or_404(store, session_id)
+        if session.state != 'active':
+            raise HTTPException(409, 'Session ended')
+        if action not in ('start', 'stop', 'status', 'preview'):
+            raise HTTPException(404)
+        try:
+            response = await perception.command(action, session_id)
+            if action == 'preview':
+                return Response(response.content,media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+            return response.json()
+        except httpx.HTTPStatusError as error:
+            raise HTTPException(error.response.status_code, '카메라 세션이 만료되었거나 다른 세션에서 사용 중입니다. 다시 켜주세요.') from error
+        except Exception as error:
+            raise HTTPException(503, '로컬 얼굴 분석 서비스에 연결할 수 없습니다. workers/perception/start.ps1 실행 상태를 확인하세요.') from error
+
     @app.post("/api/live/sessions/{session_id}/turns", response_model=TurnOut)
     async def create_turn(session_id: str, body: TurnIn) -> TurnOut:
         session = _session_or_404(store, session_id)
@@ -411,6 +431,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
         conversation_started_at = time.perf_counter()
+        observation, observation_detail = await perception.snapshot(session_id,body.use_observation,body.observation_window_ms,body.observation_speaking,body.observation_end_age_ms)
+        record_empathic_debug('observation.snapshot', {'session_id':session_id,'turn_id':turn_id,'observation':observation.model_dump(), 'diagnostics':observation_detail, 'model_context':observation.context() if session.mode != 'wav_test' else '', 'realtime_api_called':session.mode != 'wav_test'})
         if session.mode == "wav_test":
             if body.affect_override is None:
                 raise HTTPException(status_code=422, detail="WAV 테스트에서는 감정을 직접 선택해 주세요.")
@@ -419,7 +441,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             conversation_response = ConversationResponse(text="고정 WAV 표정 테스트", audio_path=str(test_wav), audio_streaming=False, affect=body.affect_override)
         else:
             await conversation.start_session(session_id, persona=avatar.persona, session_instruction=session.session_instruction, voice=avatar.voice)
-            conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override)
+            conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override, user_observation=observation)
         conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
@@ -467,7 +489,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not store.is_active_turn(session_id, turn_id):
             raise HTTPException(status_code=409, detail="응답이 새 발화로 인해 취소되었습니다.")
         store.set_active_turn(session_id, None)
-        return TurnOut(turn_id=turn_id, assistant_text=conversation_response.text, visemes=visemes, renderer=renderer_out)
+        return TurnOut(turn_id=turn_id, assistant_text=conversation_response.text, visemes=visemes, renderer=renderer_out, user_observation=observation)
 
     @app.get("/api/live/sessions/{session_id}/turns/{turn_id}/caption")
     async def get_turn_caption(session_id: str, turn_id: str) -> dict[str, str | bool | None]:
@@ -503,6 +525,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as error:
             raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.") from error
         await conversation.close_session(session_id)
+        try:
+            await perception.command('stop',session_id)
+        except Exception:
+            pass  # Host lease also closes capture if the browser/API disappears.
         return Response(status_code=204)
 
     @app.websocket("/ws/live/{session_id}")
@@ -543,6 +569,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "motion_override": payload.get("motion_override", False),
                         "affect_override": payload.get("affect_override"),
                         "expression_render_mode": payload.get("expression_render_mode", "speech_safe"),
+                        "use_observation": payload.get("use_observation",False),
+                        "observation_window_ms": payload.get("observation_window_ms",3000),
+                        "observation_speaking": payload.get("observation_speaking",False),
+                        "observation_end_age_ms": payload.get("observation_end_age_ms",0),
                     })
                 except Exception as error:
                     await websocket.send_json({"type": "error", "detail": f"Invalid motion_plan: {error}"})
@@ -554,7 +584,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await websocket.send_json({"type": "turn.started", "turn_id": turn_id})
                 conversation_started_at = time.perf_counter()
                 await conversation.start_session(session_id, persona=avatar.persona, session_instruction=session.session_instruction, voice=avatar.voice)
-                answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=turn_body.affect_override)
+                observation, observation_detail = await perception.snapshot(session_id,turn_body.use_observation,turn_body.observation_window_ms,turn_body.observation_speaking,turn_body.observation_end_age_ms)
+                record_empathic_debug('observation.snapshot', {'session_id':session_id,'turn_id':turn_id,'observation':observation.model_dump(),'diagnostics':observation_detail,'model_context':observation.context()})
+                answer = await conversation.respond(persona=avatar.persona, user_text=text, session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=turn_body.affect_override, user_observation=observation)
                 conversation_elapsed_ms = round((time.perf_counter() - conversation_started_at) * 1_000)
                 if not store.is_active_turn(session_id, turn_id):
                     await websocket.send_json({"type": "turn.cancelled", "turn_id": turn_id})

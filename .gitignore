@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv-perception/
 
 # Runtime data and secrets
 .env

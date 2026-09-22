@@ -144,7 +144,7 @@ it('defaults the simplified homepage to WAV + TRT10 and skips caption/API conver
   expect([...host.querySelectorAll('button')].some(button=>button.textContent==='Auto')).toBe(false)
   vi.mocked(api.turnCaption).mockClear()
   await act(async()=>host.querySelector<HTMLButtonElement>('.wav-test-panel .primary-button')!.click())
-  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',{emotion:'neutral',intensity:1},expect.any(String),'speech_safe')
+  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',{emotion:'neutral',intensity:1},expect.any(String),'speech_safe',{use_observation:false,observation_window_ms:3000,observation_speaking:false,observation_end_age_ms:0})
   expect(api.turnCaption).not.toHaveBeenCalled()
   await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('.test-modes button')].find(button=>button.textContent==='Realtime 대화')!.click())
   expect(api.createSession).toHaveBeenLastCalledWith('demo-seoyeon','ditto_realtime_trt10',expect.any(String),'realtime')

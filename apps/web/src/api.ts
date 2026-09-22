@@ -56,11 +56,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction, mode }),
     }),
-  sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe') => {
+  sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe', observation?: {use_observation:boolean;observation_window_ms:number;observation_speaking:boolean;observation_end_age_ms:number}) => {
     // Auto intentionally omits affect_override, so only that path invokes
     // the Realtime affect tool. Manual evaluation sends two bounded fields.
     const body = {
       text,
+      ...observation,
       client_turn_id: clientTurnId,
       ...(expressionRenderMode ? { expression_render_mode: expressionRenderMode } : {}),
       ...(affectOverride ? { affect_override: affectOverride } : {}),
@@ -72,6 +73,12 @@ export const api = {
   },
   turnCaption: (sessionId: string, turnId: string) =>
     request<{ text: string | null; done: boolean }>(`/api/live/sessions/${sessionId}/turns/${turnId}/caption`),
+  perception: (sessionId:string, action:'start'|'stop'|'status') => request<import('./PerceptionPanel').PerceptionStatus>(`/api/live/sessions/${sessionId}/perception/${action}`,{method:'POST'}),
+  perceptionPreview: async (sessionId:string) => {
+    const r=await fetch(`${base}/api/live/sessions/${sessionId}/perception/preview`,{method:'POST',headers:accessToken?{'X-Avatar-Token':accessToken}:{}})
+    if(!r.ok) throw new Error('Preview unavailable')
+    return r.blob()
+  },
   interrupt: (sessionId: string) =>
     request<{ state: string }>(`/api/live/sessions/${sessionId}/interrupt`, { method: 'POST' }),
   endSession: (sessionId: string) =>

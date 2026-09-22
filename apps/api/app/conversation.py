@@ -16,6 +16,7 @@ import httpx
 from websockets.asyncio.client import connect
 
 from .models import AffectIntent
+from .perception import UserObservation, OBSERVATION_POLICY
 from .realtime_caption import RealtimeCaption
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ AFFECT_TOOL = {
 class ConversationProvider:
     name = "demo"
 
-    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None) -> ConversationResponse:
+    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None, user_observation: UserObservation | None = None) -> ConversationResponse:
         raise NotImplementedError
 
     async def start_session(self, session_id: str, *, persona: str, session_instruction: str | None = None, voice: str | None = None) -> None:
@@ -102,7 +103,7 @@ class SafeDemoConversation(ConversationProvider):
         self._reply_count += 1
         return language
 
-    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None) -> ConversationResponse:
+    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None, user_observation: UserObservation | None = None) -> ConversationResponse:
         text = user_text.strip()
         lowered = text.lower()
         if any(word in lowered for word in ("미성년", "아동", "아이 사진", "유명인 사칭", "딥페이크 범죄")):
@@ -133,13 +134,15 @@ class OllamaConversation(ConversationProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None) -> ConversationResponse:
+    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None, user_observation: UserObservation | None = None) -> ConversationResponse:
         system = (
             "You are an explicitly AI-generated private avatar in a live conversation. "
             "Answer in the user's language, concisely and warmly. Never claim to be human. "
             "Do not help impersonation, misuse of likenesses, or sexual content involving minors. "
             f"Persona: {persona}"
         )
+        if user_observation and user_observation.context():
+            system += "\n" + OBSERVATION_POLICY + user_observation.context()
         payload = {"model": self.model, "stream": False, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_text}]}
         async with httpx.AsyncClient(timeout=18) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
@@ -234,11 +237,12 @@ class OpenAIRealtimeConversation(ConversationProvider):
         except (json.JSONDecodeError, ValidationError) as error:
             raise RuntimeError("Realtime affect tool returned an invalid affect") from error
 
-    async def _request_affect(self, socket: object) -> tuple[AffectIntent, str]:
+    async def _request_affect(self, socket: object, instructions: str | None = None) -> tuple[AffectIntent, str]:
         """Run the required compact tool phase before audio generation."""
 
         await socket.send(json.dumps({"type": "response.create", "response": {
             "tool_choice": {"type": "function", "name": AFFECT_TOOL_NAME},
+            **({"instructions": instructions} if instructions else {}),
         }}))  # type: ignore[union-attr]
         pending: tuple[AffectIntent, str] | None = None
         while True:
@@ -272,7 +276,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                     return pending
                 raise RuntimeError("Realtime response completed without set_avatar_affect")
 
-    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None) -> ConversationResponse:
+    async def respond(self, *, persona: str, user_text: str, session_instruction: str | None = None, session_id: str | None = None, turn_id: str | None = None, affect_override: AffectIntent | None = None, user_observation: UserObservation | None = None) -> ConversationResponse:
         started = time.perf_counter()
         key = session_id or f"one-turn-{uuid.uuid4().hex}"
         caption_key = turn_id or f"caption-{uuid.uuid4().hex}"
@@ -302,9 +306,13 @@ class OpenAIRealtimeConversation(ConversationProvider):
                     "type": "conversation.item.create",
                     "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]},
                 }))
+                # Response-local instructions never accumulate face observations in history.
+                observation_context = user_observation.context() if user_observation else ''
+                turn_instructions = (self._instructions(persona, session_instruction) + '\n' + OBSERVATION_POLICY + observation_context) if observation_context else None
+                response_options = {'instructions': turn_instructions} if turn_instructions else {}
                 if affect_override is None:
                     affect_started = time.perf_counter()
-                    affect, call_id = await self._request_affect(socket)
+                    affect, call_id = await self._request_affect(socket, turn_instructions)
                     affect_elapsed_ms = round((time.perf_counter() - affect_started) * 1_000)
                     # Acknowledge the completed local tool. The model then keeps
                     # the function item in its turn context while generating its
@@ -318,13 +326,13 @@ class OpenAIRealtimeConversation(ConversationProvider):
                         },
                     }))
                     # Keep the session's audio modality for the continuation.
-                    await socket.send(json.dumps({"type": "response.create"}))
+                    await socket.send(json.dumps({"type": "response.create", **({"response": response_options} if response_options else {})}))
                 else:
                     # Manual evaluation deliberately avoids the affect function
                     # call: this keeps its token/latency path out of the test.
                     affect = affect_override
                     affect_elapsed_ms = 0
-                    await socket.send(json.dumps({"type": "response.create", "response": {"tool_choice": "none"}}))
+                    await socket.send(json.dumps({"type": "response.create", "response": {"tool_choice": "none", **response_options}}))
                 while True:
                     raw = await asyncio.wait_for(socket.recv(), timeout=35)  # type: ignore[union-attr]
                     event = json.loads(raw)

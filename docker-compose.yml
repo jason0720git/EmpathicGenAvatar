@@ -23,6 +23,7 @@ services:
       # Local developer diagnostics only. This records raw turn text and the
       # expression decision under the private Docker volume; set false to stop.
       EMPATHIC_DEBUG_LOG: ${EMPATHIC_DEBUG_LOG:-true}
+      PERCEPTION_URL: http://host.docker.internal:8020
     ports:
       - "8000:8000"
     volumes:

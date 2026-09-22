@@ -1,0 +1,8 @@
+numpy==1.26.4
+opencv-contrib-python==4.11.0.86
+mediapipe==1.0.1
+onnxruntime==1.30.0
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pytest>=8,<9
+httpx>=0.27,<1

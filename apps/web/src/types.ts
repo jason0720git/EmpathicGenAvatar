@@ -67,6 +67,7 @@ export interface MotionPlan {
 }
 
 export interface TurnResponse {
+  user_observation?: Record<string, unknown>
   turn_id: string
   assistant_text: string
   visemes: Array<{ at_ms: number; value: number }>
