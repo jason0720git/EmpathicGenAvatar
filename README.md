@@ -59,6 +59,7 @@ pnpm test:api
 
 ## Technology reviews
 
+- [Empathic nonverbal control review (2026-10-28, Korean)](docs/empathic-nonverbal-control-review-20261028.md): current priority—explicit face, gaze, and head control with simple body animation loops.
 - [Full-body avatar technology review (2026-10-28, Korean)](docs/full-body-avatar-technology-review-20261028.md): Ditto/LAM alternatives, release availability, unified face/body control, and the proposed evaluation plan.
 
 ## Safety boundary
