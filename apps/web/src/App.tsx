@@ -3,6 +3,7 @@ import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit
 import { GeometryHandoff, warmGeometryHandoff } from './geometryHandoff'
 import { PerceptionPanel, type PerceptionHandle } from './PerceptionPanel'
 import { IdleCanvas } from './IdleCanvas'
+import { TurnDiagnostics } from './TurnDiagnostics'
 import './rendered-video.css'
 import './test-studio.css'
 import {
@@ -523,6 +524,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const [affectIntensity, setAffectIntensity] = useState(wavTest ? 1 : 0.5)
   const [expressionRenderMode, setExpressionRenderMode] = useState<'off' | 'native' | 'legacy' | 'speech_safe'>('speech_safe')
   const [diagnosticTurns, setDiagnosticTurns] = useState<Array<{id: string; label: string}>>([])
+  const [traceTurn,setTraceTurn]=useState(''),[traceError,setTraceError]=useState('')
   const [feedbackTurn, setFeedbackTurn] = useState('')
   const [feedbackIssue, setFeedbackIssue] = useState('mouth_blur')
   const [feedbackSeverity, setFeedbackSeverity] = useState(2)
@@ -951,6 +953,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     stopListening()
     setDraft('')
     const turnId = `user-${Date.now()}`
+    setTraceTurn(turnId);setTraceError('')
     const turnStartedAt = performance.now()
     if (apiOnline) void api.telemetry({ turn_id: turnId, event: 'turn_submitted', elapsed_ms: 0 })
     // `turnId` is also the server-side assistant response id. Keep the local
@@ -992,6 +995,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     } catch (error) {
       if (!mountedRef.current) return
       const message = error instanceof Error ? error.message : '응답을 생성하지 못했습니다.'
+      setTraceError(message)
       setCaptions((items) => [...items, { id: `error-${Date.now()}`, role: 'assistant', text: message, at: new Date() }])
       setState('ready')
     }
@@ -1120,14 +1124,14 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           <div className="video-bottom"><div className="avatar-nameplate"><span className="avatar-mini">{initials(avatar.name)}</span><div><strong>{avatar.name}</strong><small>{avatar.persona}</small></div></div><div className="engine-badge"><span className="metric-dot mint" /> {avatar.engine === 'remote' ? method === 'ditto_realtime_trt10' ? 'Ditto TRT 10 · GPU' : method === 'ditto_realtime_fast' ? 'Ditto Fast Lane · GPU' : method === 'ditto_realtime' ? 'Ditto Realtime · GPU' : 'Ditto Default · GPU' : '브라우저 미리보기'}</div></div>
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
-          <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? '고정 WAV · API 토큰 사용 없음' : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
+          <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? (affectMode === 'auto' ? '얼굴 관측 → 표정 · 진단 강도 65% · API 토큰 없음' : '고정 WAV · API 토큰 사용 없음') : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
           <details><summary>고급 합성 설정</summary>
           <div className="affect-buttons" role="group" aria-label="표정 합성 비교 모드">
             {([['speech_safe','발음 보호 (기본)'],['off','표정 없음'],['native','감정 조건만'],['legacy','기존 증폭 (비교용)']] as const).map(([mode,label]) => <button type="button" key={mode} className={expressionRenderMode === mode ? 'selected' : ''} onClick={() => setExpressionRenderMode(mode)}>{label}</button>)}
           </div>
           </details>
           <div className="affect-buttons" role="group" aria-label="표정 선택">
-            {!wavTest && <button type="button" className={affectMode === 'auto' ? 'selected auto' : ''} onClick={() => setAffectMode('auto')}>Auto</button>}
+            <button type="button" className={affectMode === 'auto' ? 'selected auto' : ''} onClick={() => setAffectMode('auto')}>{wavTest ? 'Auto · 얼굴 표정 테스트' : 'Auto'}</button>
             {affectOptions.map((option) => <button type="button" key={option.value} className={affectMode === option.value ? 'selected' : ''} onClick={() => setAffectMode(option.value)}>{option.label}</button>)}
           </div>
           <div className="intensity-buttons" role="group" aria-label="표정 강도 선택">
@@ -1172,6 +1176,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         <div className="caption-footnote"><span><span className="keycap">↵</span> 보내기</span>{voiceSupported ? <span><Mic size={13} /> {voiceTurnMode === 'push_to_talk' ? '두 번 눌러 음성 전송' : 'VAD 자동 전송'}</span> : <span>텍스트 대화 사용 가능</span>}</div>
         {lastAssistant && <button className="replay-button" onClick={() => speak({ turn_id: lastAssistant.id, assistant_text: lastAssistant.text, visemes: [], renderer: { mode: 'preview', status: 'replay' } }, avatar.voice, setState, setAudioLevel)}><Play size={14} /> 마지막 답변 다시 듣기</button>}
       </aside>}
+      <aside className="diagnostics-column"><TurnDiagnostics sessionId={sessionId??''} turnId={traceTurn} online={apiOnline} active={state==='thinking'||state==='speaking'} error={traceError}/></aside>
     </div>
   )
 }

@@ -1,0 +1,26 @@
+services:
+  gaussian-worker:
+    build:
+      context: .
+    image: empathic-avatar-gaussian-worker:latest
+    environment:
+      LAM_ROOT: /opt/lam
+      LAM_TEMPLATE_ZIP: /opt/lam-web/asset/arkit/p2-1.zip
+      GAUSSIAN_DATA_ROOT: /gaussian-data
+      LAM_JOB_TIMEOUT_SECONDS: "1200"
+    ports:
+      - "127.0.0.1:8040:8020"
+    volumes:
+      - ../../vendor/LAM:/opt/lam
+      - ../../vendor/LAM_WebRender:/opt/lam-web:ro
+      - ../../data/gaussian:/gaussian-data
+      - .:/gaussian-worker:ro
+      - gaussian-extension-cache:/root/.cache/torch_extensions
+    gpus: all
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8020/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+volumes:
+  gaussian-extension-cache:

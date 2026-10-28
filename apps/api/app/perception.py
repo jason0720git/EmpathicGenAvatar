@@ -40,6 +40,17 @@ class UserObservation(BaseModel):
             smile=self.cues.smile,brow_tension=self.cues.browTension,speaking=self.speaking),separators=(',',':'))
 
 
+def wav_test_affect(observation: UserObservation):
+    # Diagnostic mirroring only, not a conversational empathy policy.
+    from .models import AffectIntent
+    mapping = {'neutral':'neutral','happiness':'happy','sadness':'sad','anger':'angry',
+               'fear':'fear','surprise':'surprise','disgust':'disgust'}
+    if not observation.context() or observation.label not in mapping:
+        raise ValueError('WAV Auto는 유효한 얼굴 관측이 필요합니다. 얼굴 분석을 켜고 1초 이상 정면을 보거나 감정을 직접 선택해 주세요.')
+    emotion = mapping[observation.label]
+    return AffectIntent(emotion=emotion, intensity=0 if emotion == 'neutral' else .65)
+
+
 OBSERVATION_POLICY = (
     'Current-turn facial observations are uncertain appearance cues, NOT the user\'s true emotion. '
     'Prioritize their words and stated feelings. Do not diagnose, copy their emotion automatically, '

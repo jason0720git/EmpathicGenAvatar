@@ -18,6 +18,12 @@ uploads/
 models/
 vendor/
 
+# Generated replay, validation and local build output (keep on disk only)
+/artifacts/
+/apps/web/public/gaussian-review-*/
+/tmp/
+*.log
+
 # IDE / OS
 .DS_Store
 Thumbs.db

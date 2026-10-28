@@ -20,6 +20,20 @@ gaze or an instruction to mirror the user's face.
 
 ## Independent installation
 
+For subsequent launches (including after reboot), run `powershell -NoProfile
+-ExecutionPolicy Bypass -File start-local.ps1` from the repository root. This
+starts/checks the native face service, starts Docker services and synchronizes
+their local credential. Add `-Build` after code changes. Docker alone cannot
+start the native Windows camera process. No login autorun is installed.
+
+WAV now offers **Auto · 얼굴 표정 테스트**: enable face analysis, then generate
+the WAV test. Each turn maps the recent valid observed label to the matching
+avatar preset at a fixed diagnostic intensity of 65% (neutral: 0%). Confidence
+is not interpreted as emotional intensity. Missing/stale/uncertain observations
+produce an actionable error, not a neutral fallback. This is token-free
+diagnostic mirroring, not Realtime's text-aware empathic response policy.
+Manual selection still overrides observations, and cameras remain off by default.
+
 From the repository root (Python 3.12 on this machine):
 
 ```powershell
@@ -50,6 +64,56 @@ do not publish either control endpoint without appropriate access controls.
 
 ## Source and behavior
 
+### Performance and live diagnosis (2026-09-22)
+
+Follow-up: diagnostic output is now a third column, to the right of chat/WAV
+controls, with its own viewport-bounded scroll area. Below 1100px the avatar
+sits above two side-by-side panels; only narrow mobile widths stack them.
+
+The BCC950 capture-only probes found DirectShow negotiating YUY2 and reporting
+FPS=0 when no device FPS was set. Requesting MJPG still reported YUY2, so we do
+not claim MJPEG was accepted. Inference throttling did not configure the camera
+transport. The default capture backend is now MSMF, explicitly 640x480 at 10
+device FPS, with OpenCV hardware transforms disabled before importing OpenCV.
+Local hardware verified MSMF, 10 FPS and a 640x480 frame (first read ~512ms).
+This bypasses the old DirectShow path; the original mouse-stutter cause is not
+proven by low average CPU numbers. Capture metadata is surfaced in status/logs.
+
+Closing/reloading the page sends a keepalive stop request rather than only
+waiting for the 12-second lease. A foreground frame-gap watchdog ignores the
+first four seconds, then stops capture after four >250ms gaps within five sec,
+with a visible warning and `perception_ui_stall` telemetry. This is a safety
+fallback, not a guarantee against OS/USB/GPU-driver latency or a reason to hide
+the symptom. It never automatically restarts the camera.
+
+Only focused, visible windows participate in the watchdog: automated/background
+Chrome windows can be throttled to 1 FPS even without camera capture. An initial
+background watchdog trigger was therefore not accepted as proof of the user's
+mouse-stutter cause. The panel displays foreground FPS/p95/max frame gaps and
+records `perception_ui_sample` every 5 sec while capture is enabled and focused.
+These records are in `/data/telemetry/turn-events.jsonl` under
+`perception-<session_id>`. Device/USB-level pointer latency is not measured by
+requestAnimationFrame, so an end-user foreground retest is still necessary.
+
+- ONNX Runtime worker spinning is disabled; OpenCV runs with one CPU thread.
+- Preview defaults OFF. JPEG encoding occurs at most once/sec only while a
+  visible expanded panel requests it; hidden tabs keep only a 3-second lease
+  heartbeat. Expanded detailed JSON is opt-in. Preview demand expires in 3 sec.
+- Local status includes actual FPS, frame processing time, and process CPU
+  usage (100% = one CPU core, not the entire PC).
+- `smoke_models.py --frames 60 --fps 5` repeats an offline fixture without
+  camera/cloud calls. On this machine, baseline 10 FPS consumed 30.1% of one
+  core vs 4.2% after tuning at 5 FPS; inference was 7.0 vs 6.9 ms. This is a
+  fixture comparison, NOT a measured Chrome speedup or proof of its sole cause.
+- The response diagnostic panel uses a bounded in-memory, session/turn-filtered
+  incremental endpoint (512 server records, 64 visible records, single-flight
+  1-second polls, paused in hidden tabs). It never scans historical JSONL files
+  on each poll. Existing JSON downloads retain historical diagnostics.
+- Actual response-local facial context, policy, tool start/result/skip, audio
+  start, final text, requested motion and renderer acknowledgement are logged.
+  These are observable inputs/outputs, not the model's hidden reasoning.
+  No extra LLM calls, tokens, or raw-camera-media cloud transmission are added.
+
 `workers/perception/sobia_face.py` is the dependency closure for the SOBIA bridge's
 single-face payload and EmotionClassifierRuntime, extracted on 2026-09-21.
 Main/kead serialized mode 3 = V3GuardStrict is pinned, not the newer R2 field
@@ -59,7 +123,7 @@ and limit ONNX to two intra-op/one inter-op CPU threads. Models and MediaPipe ru
 on CPU to avoid taking Ditto's GPU inference budget. No wholesale SOBIA service
 or multi-person state machine is imported.
 
-Capture target: 640x480, at most 10 analyses/sec. Slow frames are not queued for
+Capture target: 640x480, at most 5 analyses/sec. Slow frames are not queued for
 catch-up. Memory ring: at most 1800 samples; summaries use at most 120 seconds.
 Use whole recorded speech interval (with end-age offset for recognition delay),
 or the last 3 seconds for text/WAV. A 1-second freshness limit, minimum 3 usable

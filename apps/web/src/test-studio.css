@@ -1,11 +1,14 @@
-.test-studio { max-width: 1500px; margin: 0 auto; padding: 24px; }
+.test-studio { max-width: 1920px; margin: 0 auto; padding: 24px; }
 .test-toolbar { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
 .test-toolbar > span { margin-left: auto; color: #92a7d5; font-size: 14px; }
 .test-toolbar select { background: #141d38; color: #edf1ff; border: 1px solid #303959; padding: 10px; border-radius: 8px; }
 .test-modes { display: flex; gap: 6px; padding: 5px; background: #111931; border-radius: 12px; }
 .test-modes button { padding: 12px 22px; border: 0; border-radius: 8px; color: #a9b8db; background: transparent; }
 .test-modes button.selected { background: #b697f6; color: #11162a; font-weight: 700; }
-.test-studio .live-layout { grid-template-columns: minmax(0, 1fr) 350px; }
+.test-studio .live-layout { max-width: none; grid-template-columns: minmax(360px, 1fr) minmax(260px, .52fr) minmax(290px, .58fr); align-items: start; }
+.diagnostics-column { min-width: 0; position: sticky; top: 16px; border: 1px solid #293452; border-radius: 16px; background: #111931; padding: 16px; }
+.diagnostics-column .turn-diagnostics { border: 0; padding: 0; margin: 0; }
+.diagnostics-column .diagnostic-events { max-height: calc(100vh - 240px); }
 .test-studio .video-canvas { min-height: 0; height: clamp(280px, calc(100vh - 330px), 720px); }
 .test-studio .video-bottom, .test-studio .render-pipeline { display: none; }
 .test-studio .live-stage-top h2 { font-size: 21px; }
@@ -18,4 +21,14 @@
 .wav-filename, .wav-test-history { overflow-wrap: anywhere; }
 .wav-test-panel audio { width: 100%; }
 .wav-test-history { max-height: 260px; overflow: auto; }
-@media (max-width: 900px) { .test-studio .live-layout { grid-template-columns: 1fr; } .test-studio { padding: 16px; } .test-toolbar > span { margin-left: 0; } }
+.turn-diagnostics { min-width: 0; flex-shrink: 0; border-top: 1px solid #303959; margin-top: 12px; padding-top: 12px; font-size: 12px; contain: layout; }
+.turn-diagnostics h4 { margin: 0 0 8px; color: #d8c7ff; }
+.turn-diagnostics small, .turn-diagnostics time { color: #96a9d2; font-size: 10px; }
+.turn-diagnostics h4 small { display: block; margin-top: 4px; }
+.turn-diagnostics p { margin: 5px 0 8px; font-size: 11px; overflow-wrap: anywhere; line-height: 1.5; }
+.diagnostic-events { max-height: 290px; overflow: auto; overscroll-behavior: contain; }
+.diagnostic-events article { padding: 10px 6px; border-bottom: 1px solid #293452; }
+.diagnostic-events time { display: block; }
+.diagnostic-events pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+@media (max-width: 1100px) { .test-studio .live-layout { grid-template-columns: minmax(0,1fr) minmax(0,1fr); } .test-studio .live-stage { grid-column: 1 / -1; } }
+@media (max-width: 650px) { .test-studio .live-layout { grid-template-columns: 1fr; } .diagnostics-column { position: static; } .test-studio { padding: 16px; } .test-toolbar > span { margin-left: 0; } }

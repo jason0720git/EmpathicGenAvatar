@@ -1,0 +1,4 @@
+-r requirements.txt
+grpcio>=1.64,<2
+protobuf>=5,<7
+numpy>=2,<3

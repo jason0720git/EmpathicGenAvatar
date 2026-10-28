@@ -14,14 +14,17 @@ from pathlib import Path
 from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from observations import ObservationBuffer
+from capture import open_camera
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 class CameraOwner:
-    def __init__(self, model_dir, camera_index=0):
+    def __init__(self, model_dir, camera_index=0, backend='msmf'):
         self.model_dir = Path(model_dir)
         self.camera_index = camera_index
+        self.backend = backend
+        self.capture_info = {}
         self.lock = threading.RLock()
         self.session = None
         self.deadline = 0
@@ -30,6 +33,9 @@ class CameraOwner:
         self.error = ''
         self.error_session = None
         self.preview = b''
+        self.preview_until = 0
+        self.analysis_fps = 5
+        self.performance = {}
         self.buffer = ObservationBuffer()
         self.thread = None
         self.stop_event = threading.Event()
@@ -48,6 +54,9 @@ class CameraOwner:
             self.generation += 1
             self.buffer.clear()
             self.preview = b''
+            self.preview_until = 0
+            self.performance = {}
+            self.capture_info = {}
             self.error = ''
             self.error_session = None
             self.state = 'starting'
@@ -76,12 +85,13 @@ class CameraOwner:
                 self.deadline = time.monotonic()+12
             summary = self.buffer.summarize(time.monotonic(), window, speaking,end_age_ms)
             return dict(state=self.state, error=self.error, observation=summary,
-                        camera_index=self.camera_index, max_faces=1, preview_available=bool(self.preview))
+                        camera_index=self.camera_index, max_faces=1, preview_available=bool(self.preview), analysis_fps=self.analysis_fps, performance=self.performance, capture=self.capture_info)
 
     def run(self, generation):
         cap = detector = None
         try:
             import cv2
+            cv2.setNumThreads(1)
             import mediapipe as mp
             from mediapipe.tasks import python
             from mediapipe.tasks.python import vision
@@ -99,13 +109,12 @@ class CameraOwner:
                 output_face_blendshapes=True, output_facial_transformation_matrixes=True,
                 min_face_detection_confidence=.5, min_face_presence_confidence=.5,
                 min_tracking_confidence=.5))
-            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            if not cap.isOpened():
-                raise RuntimeError('Cannot open camera; close other camera applications')
+            cap, self.capture_info = open_camera(self.camera_index, self.backend)
+            print('Camera capture: '+json.dumps(self.capture_info), flush=True)
             missing = True
             stamp = 0
+            preview_at = 0
+            metrics_at = time.monotonic(); cpu_at = time.process_time(); frames = 0
             while not self.stop_event.is_set() and time.monotonic() < self.deadline:
                 started = time.monotonic()
                 ok, frame = cap.read()
@@ -146,14 +155,27 @@ class CameraOwner:
                                 left_eye=raw['leftEye'], right_eye=raw['rightEye'],
                                 blendshapes=blend, classifier_ms=affect.get('classifierLatencyMs',0))
                 elapsed = (time.monotonic()-started)*1000
-                _, jpeg = cv2.imencode('.jpg', cv2.resize(frame, (320,240)), [cv2.IMWRITE_JPEG_QUALITY,65])
+                jpeg = None
+                if time.monotonic() < self.preview_until and time.monotonic()-preview_at >= 1:
+                    _, jpeg = cv2.imencode('.jpg', cv2.resize(frame, (320,240)), [cv2.IMWRITE_JPEG_QUALITY,65])
+                    preview_at = time.monotonic()
                 with self.lock:
                     if self.stop_event.is_set() or self.generation != generation:
                         break
                     self.state = 'running'
+                    frames += 1
+                    now = time.monotonic()
+                    if now-metrics_at >= 2:
+                        self.performance = dict(processing_ms=round(elapsed,1),
+                            cpu_core_percent=round(100*(time.process_time()-cpu_at)/(now-metrics_at),1),
+                            actual_fps=round(frames/(now-metrics_at),1),capture_width=frame.shape[1],capture_height=frame.shape[0])
+                        metrics_at=now;cpu_at=time.process_time();frames=0
                     self.buffer.add(time.monotonic(), face, elapsed)
-                    self.preview = jpeg.tobytes()
-                self.stop_event.wait(max(0, .1-(time.monotonic()-started)))
+                    if jpeg is not None:
+                        self.preview = jpeg.tobytes()
+                    elif time.monotonic() >= self.preview_until:
+                        self.preview = b''
+                self.stop_event.wait(max(0, 1/self.analysis_fps-(time.monotonic()-started)))
         except Exception as exc:
             with self.lock:
                 self.error = str(exc)[:250]
@@ -202,6 +224,7 @@ def create_app(owner, token):
         if action == 'preview':
             with owner.lock:
                 owner.check(body.session_id)
+                owner.preview_until = time.monotonic()+3
                 return Response(owner.preview, media_type='image/jpeg',headers={'Cache-Control':'no-store'})
         return owner.status(body.session_id,body.window_ms,body.speaking,heartbeat=action in ('start','status'),end_age_ms=body.end_age_ms)
 
@@ -216,7 +239,8 @@ if __name__ == '__main__':
     parser.add_argument('--camera',type=int,default=0)
     parser.add_argument('--port',type=int,default=8020)
     parser.add_argument('--host',default='127.0.0.1')
+    parser.add_argument('--backend',choices=['msmf','dshow'],default='msmf')
     args = parser.parse_args()
     import uvicorn
     token = (ROOT/'data/perception/token').read_text().strip()
-    uvicorn.run(create_app(CameraOwner(ROOT/'models/perception',args.camera),token),host=args.host,port=args.port,access_log=False)
+    uvicorn.run(create_app(CameraOwner(ROOT/'models/perception',args.camera,args.backend),token),host=args.host,port=args.port,access_log=False)

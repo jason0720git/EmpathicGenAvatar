@@ -177,6 +177,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
         # They are cleared when the live room is closed and are never written to
         # the database or telemetry log.
         self._captions: dict[str, tuple[str, str, bool]] = {}
+        self.diagnostic = lambda event, payload: None
 
     @staticmethod
     def _instructions(persona: str, session_instruction: str | None) -> str:
@@ -290,6 +291,9 @@ class OpenAIRealtimeConversation(ConversationProvider):
         done_path = audio_path.with_suffix(".done")
         ready: asyncio.Future[ConversationResponse] = asyncio.get_running_loop().create_future()
 
+        def trace(event, **payload):
+            self.diagnostic(event, {'session_id':key,'turn_id':turn_id,**payload})
+
         async def produce() -> None:
             fragments: list[str] = []
             completed_text = ""
@@ -310,10 +314,16 @@ class OpenAIRealtimeConversation(ConversationProvider):
                 observation_context = user_observation.context() if user_observation else ''
                 turn_instructions = (self._instructions(persona, session_instruction) + '\n' + OBSERVATION_POLICY + observation_context) if observation_context else None
                 response_options = {'instructions': turn_instructions} if turn_instructions else {}
+                trace('llm.input', model=self.model, user_text=user_text, facial_context=observation_context,
+                      observation_policy=OBSERVATION_POLICY if observation_context else '',
+                      context_scope='current response only; conversation history also retained',
+                      raw_camera_media_sent=False)
                 if affect_override is None:
                     affect_started = time.perf_counter()
+                    trace('tool.started', name=AFFECT_TOOL_NAME)
                     affect, call_id = await self._request_affect(socket, turn_instructions)
                     affect_elapsed_ms = round((time.perf_counter() - affect_started) * 1_000)
+                    trace('tool.completed', name=AFFECT_TOOL_NAME, call_id=call_id, arguments=affect.model_dump(), elapsed_ms=affect_elapsed_ms)
                     # Acknowledge the completed local tool. The model then keeps
                     # the function item in its turn context while generating its
                     # ordinary audio reply; the renderer receives the same affect.
@@ -332,6 +342,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                     # call: this keeps its token/latency path out of the test.
                     affect = affect_override
                     affect_elapsed_ms = 0
+                    trace('tool.skipped', reason='Manual expression override', affect=affect.model_dump())
                     await socket.send(json.dumps({"type": "response.create", "response": {"tool_choice": "none", **response_options}}))
                 while True:
                     raw = await asyncio.wait_for(socket.recv(), timeout=35)  # type: ignore[union-attr]
@@ -352,6 +363,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                             if chunk:
                                 if first_audio_ms is None:
                                     first_audio_ms = (time.perf_counter() - started) * 1000
+                                    trace('audio.started', elapsed_ms=round(first_audio_ms))
                                 # Realtime arrives as 24 kHz S16LE PCM. Convert
                                 # each independent 3-sample block to 16 kHz as
                                 # it arrives, so Ditto can start before the
@@ -399,6 +411,7 @@ class OpenAIRealtimeConversation(ConversationProvider):
                     raise RuntimeError("OpenAI Realtime returned no initial transcript/audio")
             final_caption = (completed_text or "".join(fragments)).strip()
             self._captions[caption_key] = (key, final_caption, True)
+            trace('llm.completed', assistant_text=final_caption, affect=affect.model_dump())
             complete_ms = (time.perf_counter() - started) * 1000
             done_path.touch()
             pcm_ms = audio_path.stat().st_size / 32 if audio_path.exists() else 0
@@ -424,6 +437,8 @@ class OpenAIRealtimeConversation(ConversationProvider):
                 if task.cancelled():
                     return
                 error = task.exception()
+                if error:
+                    trace('llm.failed', error_type=type(error).__name__, error=str(error)[:300])
                 if error and not ready.done():
                     ready.set_exception(error)
                 elif error:

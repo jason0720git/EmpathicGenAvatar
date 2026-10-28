@@ -4,9 +4,10 @@ import { beforeEach, afterEach, it, expect, vi } from 'vitest'
 import App, { LiveRoom } from './App'
 import { api } from './api'
 
-vi.mock('./api', () => ({api: {
+vi.mock('./api', () => ({ApiError:class extends Error{},api: {
   avatars: vi.fn(), createSession: vi.fn(), prepareIdle: vi.fn(), endSession: vi.fn(),
   sendTurn: vi.fn(), turnCaption: vi.fn(), telemetry: vi.fn(),
+  liveDiagnostics: vi.fn().mockResolvedValue({events:[]}),
 }}))
 let clock = 0
 let root: Root
@@ -101,6 +102,8 @@ it('never paints a late older speech frame after a newer PTS', async () => {
 })
 
 it('keeps idle live during entry and only permits local face correction', async () => {
+  // Dispose RAF owners before replacing the timer implementation for this test.
+  await act(async()=>root.render(null))
   vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({canvas:{width:512,height:512},drawImage:draw,save:vi.fn(),restore:vi.fn(),translate:vi.fn(),globalAlpha:1} as unknown as CanvasRenderingContext2D)
   vi.stubGlobal('requestAnimationFrame',(cb:FrameRequestCallback)=>window.setTimeout(()=>cb(performance.now()),16))
   vi.stubGlobal('cancelAnimationFrame',(id:number)=>window.clearTimeout(id))
@@ -140,12 +143,20 @@ it('defaults the simplified homepage to WAV + TRT10 and skips caption/API conver
   expect(api.createSession).toHaveBeenLastCalledWith('demo-seoyeon','ditto_realtime_trt10',undefined,'wav_test')
   expect(host.querySelector('.sidebar')).toBeNull()
   expect(host.querySelector('.composer')).toBeNull()
+  expect(host.querySelector('.live-layout > .diagnostics-column .turn-diagnostics')).not.toBeNull()
+  expect(host.querySelector('.wav-test-panel .turn-diagnostics')).toBeNull()
   expect(host.querySelector('.test-modes .selected')?.textContent).toBe('WAV 테스트')
-  expect([...host.querySelectorAll('button')].some(button=>button.textContent==='Auto')).toBe(false)
+  expect([...host.querySelectorAll('button')].some(button=>button.textContent==='Auto · 얼굴 표정 테스트')).toBe(true)
   vi.mocked(api.turnCaption).mockClear()
   await act(async()=>host.querySelector<HTMLButtonElement>('.wav-test-panel .primary-button')!.click())
   expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',{emotion:'neutral',intensity:1},expect.any(String),'speech_safe',{use_observation:false,observation_window_ms:3000,observation_speaking:false,observation_end_age_ms:0})
   expect(api.turnCaption).not.toHaveBeenCalled()
+  await act(async()=>{ socket.onopen?.(); packet(3,0) })
+  clock=2
+  await act(async()=>vi.advanceTimersByTimeAsync(250))
+  await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='Auto · 얼굴 표정 테스트')!.click())
+  await act(async()=>host.querySelector<HTMLButtonElement>('.wav-test-panel .primary-button')!.click())
+  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',undefined,expect.any(String),'speech_safe',expect.any(Object))
   await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('.test-modes button')].find(button=>button.textContent==='Realtime 대화')!.click())
   expect(api.createSession).toHaveBeenLastCalledWith('demo-seoyeon','ditto_realtime_trt10',expect.any(String),'realtime')
   expect(host.querySelector('.composer')).not.toBeNull()

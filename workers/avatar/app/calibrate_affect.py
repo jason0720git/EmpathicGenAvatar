@@ -13,7 +13,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-from .main import CacheStore, DittoLiveRuntime, WorkerConfig, DITTO_AFFECT_DELTA_EXP
+from .main import CacheStore, DittoLiveRuntime, WorkerConfig, DITTO_AFFECT_DELTA_EXP, rest_mouth_offset
 
 
 def main():
@@ -32,13 +32,15 @@ def main():
         output_face_blendshapes=True)
     detector = mp.tasks.vision.FaceLandmarker.create_from_options(options)
 
-    def render(delta, native_blink=False):
+    def render(delta, native_blink=False, rest_gain=0):
         driving = copy.deepcopy(info)
         driving['exp'] = info['exp'] + delta.reshape(1, 63)
         if native_blink:
             _, x_d = sdk.motion_stitch(info, copy.deepcopy(info), delta_exp=delta)
         else:
             x_d = sdk.motion_stitch.stitch_net(x_s, transform_keypoint(driving))
+        if rest_gain:
+            x_d = x_d + rest_mouth_offset(info['scale'], rest_gain)
         rgb = sdk.decode_f3d(sdk.warp_f3d(source['f_s_lst'][0], x_s, x_d)).astype(np.uint8)
         result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb)))
         if not result.face_blendshapes:
@@ -55,6 +57,18 @@ def main():
     rgb, scores = render(zero)
     cv2.imwrite(str(output / 'baseline.jpg'), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     rows.append({'name': 'baseline', 'scores': scores})
+    if '--rest-mouth' in sys.argv:
+        for value in (0, 1.0, 2.0):
+            rgb, scores = render(zero, rest_gain=value)
+            rows.append({'name':f'lip3={value}','scores':scores})
+            tile=cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
+            tile=cv2.copyMakeBorder(tile,30,0,0,0,cv2.BORDER_CONSTANT)
+            cv2.putText(tile,f'lip3={value}',(10,22),cv2.FONT_HERSHEY_SIMPLEX,.6,(255,255,255),1)
+            tiles.append(tile)
+        cv2.imwrite(str(output/'rest-mouth.jpg'),np.hstack(tiles))
+        (output/'rest-mouth.json').write_text(json.dumps(rows,indent=2))
+        detector.close()
+        return
     if '--blink' in sys.argv:
         blink_rows = []
         for name in ('fear', 'surprise'):

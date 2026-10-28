@@ -1,0 +1,86 @@
+{
+  "neutral": {},
+  "happy": {
+    "mouthSmileLeft": 1,
+    "mouthSmileRight": 1,
+    "mouthDimpleLeft": 0.12,
+    "mouthDimpleRight": 0.12,
+    "cheekSquintLeft": 0.9,
+    "cheekSquintRight": 0.9,
+    "eyeSquintLeft": 0.35,
+    "eyeSquintRight": 0.35,
+    "jawOpen": 0.22,
+    "mouthUpperUpLeft": 0.32,
+    "mouthUpperUpRight": 0.32
+  },
+  "sad": {
+    "browInnerUp": 1,
+    "browDownLeft": 0.6,
+    "browDownRight": 0.6,
+    "mouthFrownLeft": 0.85,
+    "mouthFrownRight": 0.85,
+    "eyeSquintLeft": 0.25,
+    "eyeSquintRight": 0.25,
+    "mouthPucker": 0.2,
+    "mouthRollLower": 0.22,
+    "mouthShrugLower": 0.3
+  },
+  "angry": {
+    "browDownLeft": 1,
+    "browDownRight": 1,
+    "eyeSquintLeft": 0.6,
+    "eyeSquintRight": 0.6,
+    "noseSneerLeft": 0.45,
+    "noseSneerRight": 0.45,
+    "mouthPressLeft": 0.12,
+    "mouthPressRight": 0.12,
+    "mouthRollUpper": 0.08,
+    "mouthRollLower": 0.08,
+    "jawOpen": 0.12,
+    "mouthFrownLeft": 0.65,
+    "mouthFrownRight": 0.65
+  },
+  "fear": {
+    "browInnerUp": 1,
+    "browOuterUpLeft": 0.75,
+    "browOuterUpRight": 0.75,
+    "browDownLeft": 0.25,
+    "browDownRight": 0.25,
+    "eyeWideLeft": 1,
+    "eyeWideRight": 1,
+    "mouthStretchLeft": 0.65,
+    "mouthStretchRight": 0.65,
+    "jawOpen": 0.23,
+    "mouthLowerDownLeft": 0.15,
+    "mouthLowerDownRight": 0.15
+  },
+  "surprise": {
+    "browInnerUp": 0.85,
+    "browOuterUpLeft": 1,
+    "browOuterUpRight": 1,
+    "eyeWideLeft": 0.9,
+    "eyeWideRight": 0.9,
+    "jawOpen": 0.55,
+    "mouthFunnel": 0.12
+  },
+  "disgust": {
+    "noseSneerLeft": 1,
+    "noseSneerRight": 1,
+    "mouthUpperUpLeft": 0.8,
+    "mouthUpperUpRight": 0.8,
+    "browDownLeft": 0.65,
+    "browDownRight": 0.65,
+    "eyeSquintLeft": 0.55,
+    "eyeSquintRight": 0.55,
+    "mouthFrownLeft": 0.25,
+    "mouthFrownRight": 0.25,
+    "cheekSquintLeft": 0.35,
+    "cheekSquintRight": 0.35
+  },
+  "contempt": {
+    "mouthDimpleRight": 1,
+    "mouthSmileRight": 0.7,
+    "browOuterUpLeft": 0.5,
+    "eyeSquintRight": 0.3
+  }
+}

@@ -385,6 +385,8 @@ class EmotionClassifierRuntime:
             options.log_severity_level = 3
             options.intra_op_num_threads = 2
             options.inter_op_num_threads = 1
+            options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+            options.add_session_config_entry('session.inter_op.allow_spinning', '0')
             self.image_session = ort.InferenceSession(
                 str(self._resolve(str(config["image_model"]))),
                 sess_options=options,

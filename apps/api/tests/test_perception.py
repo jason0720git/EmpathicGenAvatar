@@ -29,6 +29,21 @@ def test_service_failure_never_blocks_dialogue(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('label,expected',[('happiness','happy'),('sadness','sad'),('anger','angry'),('neutral','neutral'),('fear','fear'),('surprise','surprise'),('disgust','disgust')])
+def test_wav_auto_mapping(label,expected):
+    from app.perception import wav_test_affect
+    affect=wav_test_affect(observed().model_copy(update={'label':label}))
+    assert affect.emotion==expected
+    assert affect.intensity==(0 if expected=='neutral' else .65)
+
+
+@pytest.mark.parametrize('updates',[{'status':'unavailable'},{'label':'uncertain'},{'age_ms':1001},{'valid_ratio':.4}])
+def test_wav_auto_rejects_unusable_observations(updates):
+    from app.perception import wav_test_affect
+    with pytest.raises(ValueError):
+        wav_test_affect(observed().model_copy(update=updates))
+
+
 @pytest.mark.parametrize('manual',[True,False])
 def test_full_turn_context_is_transient_and_manual_skips_tool(tmp_path,manual):
     import base64
@@ -45,6 +60,8 @@ def test_full_turn_context_is_transient_and_manual_skips_tool(tmp_path,manual):
             return json.dumps(self.events.pop(0))
     async def run():
         c=OpenAIRealtimeConversation('test','test',tmp_path)
+        traces=[]
+        c.diagnostic=lambda event,payload:traces.append((event,payload))
         s=Socket();c._sessions['s']=c._Session(socket=s)
         for i,observation in enumerate([observed(),UserObservation()]):
             s.sent.clear();s.queue(not manual)
@@ -61,6 +78,12 @@ def test_full_turn_context_is_transient_and_manual_skips_tool(tmp_path,manual):
             items=[e for e in s.sent if e['type']=='conversation.item.create']
             assert not any('"face"' in json.dumps(e) for e in items)
             assert not any(e['type']=='session.update' for e in s.sent)
+        tool_events=[p for e,p in traces if e=='tool.completed']
+        assert len(tool_events)==(0 if manual else 2)
+        if not manual:assert tool_events[0]['arguments']=={'emotion':'happy','intensity':.3}
+        inputs=[p for e,p in traces if e=='llm.input']
+        assert inputs[0]['facial_context'] and not inputs[1]['facial_context']
+        assert all(p['raw_camera_media_sent'] is False for p in inputs)
     asyncio.run(run())
 
 
@@ -109,6 +132,20 @@ def test_wav_turn_observation_report_and_closed_session(tmp_path,monkeypatch):
         report=c.get('/api/debug/expression-turn/perception-wav').json()
         snap=next(e for e in report['empathic-decisions'] if e['event']=='observation.snapshot')
         assert snap['model_context']=='' and snap['realtime_api_called'] is False
+        auto=c.post(f'/api/live/sessions/{session}/turns',json={'text':'WAV','client_turn_id':'face-auto','use_observation':True})
+        assert auto.status_code==200,auto.text
+        assert auto.json()['renderer']['applied_motion']['expression']=='happy'
+        auto_report=c.get('/api/debug/expression-turn/face-auto').json()
+        assert 'wav_face_diagnostic' in json.dumps(auto_report)
+        feed=c.get(f'/api/live/sessions/{session}/diagnostics/face-auto').json()['events']
+        assert any(e['event']=='tool.skipped' for e in feed)
+        assert any(e['event']=='renderer.completed' for e in feed)
+        assert not c.get(f'/api/live/sessions/{session}/diagnostics/face-auto?after={feed[-1]["sequence"]}').json()['events']
+        other=c.post('/api/live/sessions',json={'avatar_id':avatar['id'],'mode':'wav_test'}).json()['id']
+        assert not c.get(f'/api/live/sessions/{other}/diagnostics/face-auto').json()['events']
+        missing=c.post(f'/api/live/sessions/{session}/turns',json={'text':'WAV'})
+        assert missing.status_code==422
+        assert '얼굴 분석' in missing.json()['detail']
         assert c.post('/api/debug/expression-feedback',json={'session_id':session,'turn_id':'perception-wav','issue':'wrong_observation','severity':1}).status_code==201
         assert c.delete(f'/api/live/sessions/{session}').status_code==204
         assert calls[-1][0]=='stop'

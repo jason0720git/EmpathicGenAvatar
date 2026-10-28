@@ -159,14 +159,33 @@ def affect_residual_gain(plan: MotionPlan) -> float:
     return 1.0 if plan.expression_test else (0.65 if plan.expression in FACIAL_COMPONENTS else 0.35)
 
 
+# LivePortrait's small lip-variation-three control, not jaw opening. Applied
+# after speech protection and boundary blending so all states share one rest
+# contour. Keep this conservative: large center-lip offsets break closures.
+REST_MOUTH_GAIN = 2.0
+REST_MOUTH_PROFILE = "lower-lip-relax-v1"
+
+
+def rest_mouth_offset(scale, gain: float) -> np.ndarray:
+    delta = np.zeros((1, 21, 3), dtype=np.float32)
+    amount = float(np.clip(gain, 0, 2))
+    delta[0, 19, 1] = amount * .001
+    delta[0, 19, 2] = amount * .0001
+    delta[0, 17, 1] = amount * -.0001
+    # Ditto transform_keypoint uses s * (R * kp + exp) + t: expression
+    # offsets are scaled, NOT rotated. Leave source warp coordinates intact.
+    return delta * np.asarray(scale, dtype=np.float32).reshape(-1, 1, 1)
+
+
 class BlinkAwareMotionStitch:
     """Keep the bounded lid-opening residual from opposing native blinks.
 
     Wrap the upstream component without mutating vendor files or its cached
     frame controls. Unknown/no-blink schedules leave the residual unchanged.
     """
-    def __init__(self, inner):
+    def __init__(self, inner, rest_mouth_gain: float = 0.0):
         self.inner = inner
+        self.rest_mouth_gain = float(np.clip(rest_mouth_gain, 0, 2))
         self.boundary_timeline = None
         self.boundary_preroll = 0
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
@@ -241,7 +260,13 @@ class BlinkAwareMotionStitch:
             alpha = float(np.clip(boundary_alpha, 0, 1))
             # Close the actual implicit-coordinate loop, not just the pose
             # offsets. No RGB crossfade or reversed eye-blink playback.
-            return source, source + alpha * (driving - source)
+            result = (source, source + alpha * (driving - source))
+        if self.rest_mouth_gain:
+            source, driving = result
+            # A constant rest-contour bias preserves audio-driven coordinate
+            # differences and native head motion. Do not reset it at loop or
+            # talk boundaries, and do not let lip protection remove it.
+            result = (source, driving + rest_mouth_offset(x_s_info["scale"], self.rest_mouth_gain))
         return result
 # StreamSDK prepends three 40 ms chunks for its causal frontend and its
 # Audio2Motion overlap adds another ten frames.  Those 13 frames are context,
@@ -250,7 +275,7 @@ DITTO_CHUNKSIZE = (3, 5, 2)
 DITTO_PREROLL_FRAMES = 13
 # Increment whenever the generated idle media semantics change, so existing
 # cached loops cannot mask a behavior fix in a browser session.
-IDLE_ASSET_VERSION = 6  # Restore the original natural-motion idle cache.
+IDLE_ASSET_VERSION = 11  # Shared relaxed contour; 7-10 exist from older experiments.
 IDLE_FPS = 25
 IDLE_FRAME_COUNT = 400  # 16 seconds, not a slowed-down 8-second clip
 # Real talking turns reserve a small silent motion bridge at each edge. The
@@ -710,7 +735,7 @@ class DittoLiveRuntime:
             sys.path.insert(0, str(self.config.ditto_root))
             from stream_pipeline_online import StreamSDK
             self.sdk = StreamSDK(str(self.config.config_path), str(self.config.model_root))
-            self.sdk.motion_stitch = BlinkAwareMotionStitch(self.sdk.motion_stitch)
+            self.sdk.motion_stitch = BlinkAwareMotionStitch(self.sdk.motion_stitch, rest_mouth_gain=REST_MOUTH_GAIN)
         return self.sdk
 
     def _register_avatar(self, avatar_id: str, source: Path) -> None:
@@ -1519,6 +1544,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             "target_frames": target_frames,
             "boundary_policy": "direct_live_handoff_v12",
             "native_driving_keys": "ditto_default",
+            "rest_mouth": {"profile": REST_MOUTH_PROFILE, "gain": REST_MOUTH_GAIN,
+                           "stage": "post_speech_protection_and_boundary", "idle_asset_version": IDLE_ASSET_VERSION},
             "boundary_lead_frames": DITTO_TURN_LEAD_FRAMES,
             "boundary_tail_frames": DITTO_TURN_TAIL_FRAMES,
             "emotion_condition": {

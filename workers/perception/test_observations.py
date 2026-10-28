@@ -56,6 +56,9 @@ def test_auth_session_isolation_and_stop_clear(tmp_path):
     headers={'X-Perception-Token':'x'*48}
     assert c.post('/summary',headers=headers,json={'session_id':'b'}).status_code==409
     assert c.post('/status',headers=headers,json={'session_id':'a'}).status_code==200
+    assert owner.analysis_fps==5 and owner.preview_until==0
+    assert c.post('/preview',headers=headers,json={'session_id':'a'}).status_code==200
+    assert owner.preview_until>time.monotonic()
     assert owner.deadline>time.monotonic()
     assert c.post('/stop',headers=headers,json={'session_id':'a'}).status_code==200
     assert owner.stop_event.is_set() and not owner.buffer.samples

@@ -74,6 +74,7 @@ export const api = {
   turnCaption: (sessionId: string, turnId: string) =>
     request<{ text: string | null; done: boolean }>(`/api/live/sessions/${sessionId}/turns/${turnId}/caption`),
   perception: (sessionId:string, action:'start'|'stop'|'status') => request<import('./PerceptionPanel').PerceptionStatus>(`/api/live/sessions/${sessionId}/perception/${action}`,{method:'POST'}),
+  perceptionStopOnExit: (sessionId:string) => request(`/api/live/sessions/${sessionId}/perception/stop`,{method:'POST',keepalive:true}),
   perceptionPreview: async (sessionId:string) => {
     const r=await fetch(`${base}/api/live/sessions/${sessionId}/perception/preview`,{method:'POST',headers:accessToken?{'X-Avatar-Token':accessToken}:{}})
     if(!r.ok) throw new Error('Preview unavailable')
@@ -88,4 +89,5 @@ export const api = {
   expressionFeedback: (payload: {session_id: string; turn_id: string; issue: string; severity: number; at_ms?: number; note: string}) =>
     request<{saved: boolean; turn_id: string}>('/api/debug/expression-feedback', {method: 'POST', body: JSON.stringify(payload)}),
   expressionReport: (turnId: string) => request<Record<string, unknown>>(`/api/debug/expression-turn/${encodeURIComponent(turnId)}`),
+  liveDiagnostics: (sessionId: string, turnId: string, after: number) => request<{events: Array<Record<string, unknown>>}>(`/api/live/sessions/${encodeURIComponent(sessionId)}/diagnostics/${encodeURIComponent(turnId)}?after=${after}`),
 }

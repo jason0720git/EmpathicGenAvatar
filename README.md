@@ -15,6 +15,12 @@ It deliberately does **not** claim to synthesize photorealistic streaming video 
 
 ## Quick start
 
+Install Git LFS before cloning, then run `git lfs pull` to download the bundled
+avatar images and reference audio. Model downloads stay in ignored `models/`
+and `vendor/` directories. Replay frames, validation media/reports in `artifacts/`,
+generated `apps/web/public/gaussian-review-*` pages, and local logs are not versioned;
+the scripts that generate them remain in `workers/`.
+
 ### Docker (recommended)
 
 ```powershell

@@ -25,7 +25,7 @@ from .behavior import BehaviorDecision, BehaviorPlanner
 from .conversation import ConversationProvider, ConversationResponse, OllamaConversation, OpenAIRealtimeConversation, SafeDemoConversation
 from .models import AvatarOut, CreateSessionIn, HealthOut, SessionOut, TurnIn, TurnOut, TurnTelemetryIn, ExpressionFeedbackIn
 from .quality import ImageValidationError, inspect_image
-from .perception import PerceptionClient
+from .perception import PerceptionClient, wav_test_affect
 from .renderers import AvatarRenderer, PreviewRenderer, RemoteRenderer
 from .settings import Settings
 from .store import Store
@@ -63,6 +63,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     empathic_debug_path = config.data_dir / "telemetry" / "empathic-decisions.jsonl"
     empathic_debug_lock = threading.Lock()
     logged_caption_turns: set[str] = set()
+    live_diagnostics: deque[dict] = deque(maxlen=512)
+    diagnostic_sequence = 0
 
     def record_empathic_debug(event: str, payload: dict[str, object]) -> None:
         """Persist local expression diagnostics only when explicitly enabled.
@@ -74,15 +76,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if not config.empathic_debug_log:
             return
+        nonlocal diagnostic_sequence
         record = {
             "at": datetime.now(timezone.utc).isoformat(),
             "event": event,
             **payload,
         }
         with empathic_debug_lock:
+            diagnostic_sequence += 1
+            record['sequence'] = diagnostic_sequence
+            live_diagnostics.append(record)
             empathic_debug_path.parent.mkdir(parents=True, exist_ok=True)
             with empathic_debug_path.open("a", encoding="utf-8") as output:
                 output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+    if isinstance(conversation, OpenAIRealtimeConversation):
+        conversation.diagnostic = record_empathic_debug
 
     def behavior_debug_payload(
         *,
@@ -200,6 +209,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             matches.append(record)
             report[name] = matches
         return report
+
+    @app.get('/api/live/sessions/{session_id}/diagnostics/{turn_id}')
+    async def live_turn_diagnostics(session_id: str, turn_id: str, after: int = 0):
+        _session_or_404(store, session_id)
+        if not config.empathic_debug_log:
+            raise HTTPException(403, '개발 진단 로그가 비활성화되어 있습니다.')
+        if len(turn_id) > 128:
+            raise HTTPException(422, 'Invalid turn id')
+        # A bounded in-memory feed: never reread large JSONL files while polling.
+        with empathic_debug_lock:
+            events = [r for r in live_diagnostics if r.get('session_id') == session_id and r.get('turn_id') == turn_id and r['sequence'] > after]
+        return {'events': events, 'media_included': False}
 
     @app.get("/api/avatars", response_model=list[AvatarOut])
     async def list_avatars() -> list[AvatarOut]:
@@ -431,14 +452,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         turn_id = body.client_turn_id or str(uuid.uuid4())
         store.set_active_turn(session_id, turn_id)
         conversation_started_at = time.perf_counter()
+        record_empathic_debug('turn.requested', {'session_id':session_id,'turn_id':turn_id,'mode':session.mode,'user_text':body.text,'affect_override':body.affect_override.model_dump() if body.affect_override else None,'expression_render_mode':body.expression_render_mode})
         observation, observation_detail = await perception.snapshot(session_id,body.use_observation,body.observation_window_ms,body.observation_speaking,body.observation_end_age_ms)
         record_empathic_debug('observation.snapshot', {'session_id':session_id,'turn_id':turn_id,'observation':observation.model_dump(), 'diagnostics':observation_detail, 'model_context':observation.context() if session.mode != 'wav_test' else '', 'realtime_api_called':session.mode != 'wav_test'})
         if session.mode == "wav_test":
-            if body.affect_override is None:
-                raise HTTPException(status_code=422, detail="WAV 테스트에서는 감정을 직접 선택해 주세요.")
+            try:
+                wav_affect = body.affect_override or wav_test_affect(observation)
+            except ValueError as error:
+                store.set_active_turn(session_id, None)
+                record_empathic_debug('turn.failed', {'session_id':session_id,'turn_id':turn_id,'error':str(error)})
+                raise HTTPException(status_code=422, detail=str(error)) from error
             if not test_wav.is_file():
                 raise HTTPException(status_code=503, detail="테스트 WAV 파일을 찾을 수 없습니다.")
-            conversation_response = ConversationResponse(text="고정 WAV 표정 테스트", audio_path=str(test_wav), audio_streaming=False, affect=body.affect_override)
+            conversation_response = ConversationResponse(text="고정 WAV 표정 테스트", audio_path=str(test_wav), audio_streaming=False, affect=wav_affect)
+            record_empathic_debug('tool.skipped', {'session_id':session_id,'turn_id':turn_id,'reason':'WAV: no LLM or tool call','affect':wav_affect.model_dump()})
         else:
             await conversation.start_session(session_id, persona=avatar.persona, session_instruction=session.session_instruction, voice=avatar.voice)
             conversation_response = await conversation.respond(persona=avatar.persona, user_text=body.text.strip(), session_instruction=session.session_instruction, session_id=session_id, turn_id=turn_id, affect_override=body.affect_override, user_observation=observation)
@@ -450,6 +477,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             requested=body.motion_plan,
             motion_override=body.motion_override,
         )
+        if session.mode == 'wav_test' and body.affect_override is None:
+            decision = behavior_planner.from_affect(wav_affect, source='wav_face_diagnostic', expression_test=True)
         decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"expression_render_mode": body.expression_render_mode}))
         debug_payload = behavior_debug_payload(
             transport="rest",
