@@ -57,6 +57,10 @@ pnpm build
 pnpm test:api
 ```
 
+## Technology reviews
+
+- [Full-body avatar technology review (2026-10-28, Korean)](docs/full-body-avatar-technology-review-20261028.md): Ditto/LAM alternatives, release availability, unified face/body control, and the proposed evaluation plan.
+
 ## Safety boundary
 
 This prototype is private-avatar only. The creation flow requires the operator to confirm that the subject is an adult and that they hold the right to use the likeness. Public sharing, celebrity/public-figure impersonation, voice cloning, and exports without a persistent AI label are intentionally outside this build. Before any public launch, add identity/liveness verification, trained-image moderation, prompt/output moderation, authenticated tenants, signed uploads, rate limiting, retention enforcement, audit controls, watermark/provenance, and local legal/privacy review.
