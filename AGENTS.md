@@ -1,0 +1,11 @@
+# EmpathicGenAvatar workflow
+
+- Prioritize empathic nonverbal control: expression, eyelids/eyes, and head motion. Body idle/gesture loops are sufficient until requirements change.
+- Inspect existing implementation and experiment history before proposing a replacement. Ditto already includes LivePortrait-derived expression residuals; see `docs/native8-expression-v3.md` and subsequent expression notes. Distinguish implemented code, observed runtime behavior, and hypotheses.
+- For technology research, use current primary papers, official repositories and model cards; record date, license, control channels, latency/hardware evidence, and limitations. Compare against the existing Ditto and LAM baselines.
+- Validate the affected component. Web: `pnpm test:web` and `pnpm build`; API: `.venv/Scripts/python.exe -m pytest apps/api/tests -q`. Avatar tests require their own worker directory and compatible torch/cv2 environment; do not mix worker `app` namespaces.
+- Keep replay frames, validation screenshots/videos, downloaded models, logs, credentials and runtime data out of commits. Use `artifacts/` or `tmp/` for experiment output. Preserve `.gitignore` and `.gitattributes`; track necessary binary assets with Git LFS before staging them.
+- The user authorizes commit and push after every completed chat turn in this repository. Before the final response, review the diff, run relevant checks, and run `.venv/Scripts/python.exe scripts/finish_turn.py --message "<concise description of this change>"`. A clean turn creates no empty commit. Check its result and report push failures honestly. Retry existing unpushed commits when appropriate.
+- The configured Codex `notify` callback provides a second end-of-turn attempt. Do not duplicate commits, overwrite LFS hooks, force push, reset user work, automatically merge/rebase, or push unresolved work. New branches need an explicit same-name origin upstream before using the finalizer.
+- Do not run multiple editing chats concurrently in this checkout: finalization stages all non-ignored changes. Use separate checkouts for concurrent work; the notification callback is scoped to this checkout.
+- Installed specialist skills and setup/rollback instructions are documented in `docs/development-workflow.md`. Use only relevant skills; installation does not authorize unrelated reviews, deployments, or messages.

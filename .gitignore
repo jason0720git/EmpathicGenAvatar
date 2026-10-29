@@ -22,6 +22,10 @@ vendor/
 /artifacts/
 /apps/web/public/gaussian-review-*/
 /tmp/
+/output/playwright/
+.ipynb_checkpoints/
+.env.*
+!.env.example
 *.log
 
 # IDE / OS
