@@ -84,7 +84,7 @@ interface SpeechRecognitionLike {
   onresult: ((event: SpeechRecognitionResultEventLike) => void) | null
   onend: (() => void) | null
   onerror: ((event: { error: string }) => void) | null
-  start(): void
+  start(audioTrack?: MediaStreamTrack): void
   stop(): void
 }
 
@@ -571,6 +571,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const [idleAvailable, setIdleAvailable] = useState(false)
   const [voiceSupported] = useState(() => supportsSpeechRecognition())
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  const voiceEpochRef = useRef(0)
+  const visualEpochRef = useRef(0)
   const mediaRef = useRef<{ stream: MediaStream; context: AudioContext; frame: number } | null>(null)
   const renderedAudioRef = useRef<HTMLAudioElement>(null)
   const wavPreviewRef = useRef<HTMLAudioElement>(null)
@@ -653,6 +655,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }, [renderedAudio, streamReady])
 
   const stopRealtime = () => {
+    visualEpochRef.current += 1
     if (realtimeVisualTimerRef.current) window.clearTimeout(realtimeVisualTimerRef.current)
     const socket = realtimeSocketRef.current
     realtimeSocketRef.current = null
@@ -836,6 +839,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       telemetry('socket_open')
     }
     socket.onmessage = (event) => {
+      if (!isCurrent()) return
       const packet = event.data as ArrayBuffer
       const view = new DataView(packet)
       if (packet.byteLength < 5) return
@@ -930,6 +934,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }
 
   const stopListening = ({ submitOnEnd = false }: { submitOnEnd?: boolean } = {}) => {
+    if (!submitOnEnd) voiceEpochRef.current += 1
     listeningActiveRef.current=false
     listeningPolicyRef.current.reset()
     setListeningCue(null)
@@ -1030,6 +1035,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       await interrupt()
     }
     if (state === 'thinking' || !sessionId || recognitionRef.current) return
+    const voiceEpoch = ++voiceEpochRef.current
+    const currentVoice = () => mountedRef.current && voiceEpochRef.current === voiceEpoch
     perceptionRef.current?.beginSpeech()
     setState('listening')
     listeningPolicyRef.current.reset()
@@ -1042,6 +1049,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     lastVoiceActivityRef.current = performance.now()
     try {
       await beginMedia(mediaRef, setAudioLevel, (rms) => {
+        if (!currentVoice()) return
         if(listeningActiveRef.current && recognitionRef.current){
           const cue=listeningPolicyRef.current.observe(performance.now()/1000,rms)
           if(cue)setListeningCue({kind:cue,id:Date.now()})
@@ -1058,10 +1066,11 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         if (voiceSeenRef.current && now - lastVoiceActivityRef.current >= 1_100 && voiceTextRef.current.trim()) {
           stopListening({ submitOnEnd: true })
         }
-      })
+      }, currentVoice)
     } catch {
       // The text composer remains a complete fallback when microphone permission is denied.
     }
+    if (!currentVoice()) return
     const Constructor = (window as unknown as { SpeechRecognition?: SpeechRecognitionConstructor; webkitSpeechRecognition?: SpeechRecognitionConstructor }).SpeechRecognition
       ?? (window as unknown as { webkitSpeechRecognition?: SpeechRecognitionConstructor }).webkitSpeechRecognition
     if (!Constructor) {
@@ -1075,6 +1084,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     recognition.continuous = true
     recognition.interimResults = true
     recognition.onresult = (event) => {
+      if (!currentVoice()) return
       let finalText = ''
       let partial = ''
       for (let index = 0; index < event.results.length; index += 1) {
@@ -1087,6 +1097,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       setDraft(transcript)
     }
     recognition.onerror = (event) => {
+      if (!currentVoice()) return
       if (event.error === 'not-allowed' || event.error === 'service-not-allowed') setVoiceError('마이크 권한을 허용한 뒤 다시 시도해 주세요.')
       submitVoiceOnEndRef.current = false
       if (mountedRef.current) {
@@ -1097,6 +1108,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       }
     }
     recognition.onend = () => {
+      if (!currentVoice()) return
       const text = voiceTextRef.current.trim()
       const submit = submitVoiceOnEndRef.current
       submitVoiceOnEndRef.current = false
@@ -1112,15 +1124,46 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       }
     }
     recognitionRef.current = recognition
-    recognition.start()
+    // Chromium can transcribe the same captured track used by RMS/VAD. This
+    // avoids two independently opened devices (and makes WAV capture testable).
+    try {
+      recognition.start(mediaRef.current?.stream.getAudioTracks?.()[0])
+    } catch {
+      stopListening()
+      setVoiceError('음성 인식을 시작하지 못했습니다. 마이크를 확인하고 다시 시도해 주세요.')
+      setState('ready')
+    }
   }
 
   const interrupt = async () => {
     window.speechSynthesis?.cancel()
     stopListening()
+    // Snapshot the displayed composite before cancelling audio/network. Keep
+    // this canvas visible during a short geometry handoff to the live idle.
+    const canvas = realtimeCanvasRef.current, idle = idleImageRef.current
+    const ctx = canvas?.getContext('2d')
+    const transition = canvas && idle && streamReady && idleAvailable
+      ? beginTransition(canvas,idle,canvas.width,canvas.height,performance.now(),false) : null
     stopRealtime()
-    if (sessionId && apiOnline) await api.interrupt(sessionId).catch(() => undefined)
+    const visualEpoch = visualEpochRef.current
+    if (transition && ctx && idle) {
+      transition.geometry = new GeometryHandoff()
+      transition.mixMs = 320
+      setRealtimeActive(true)
+      setStreamReady(true)
+      const blend = () => {
+        if (!mountedRef.current || visualEpochRef.current !== visualEpoch) return
+        drawTransition(ctx,idle,transition,performance.now())
+        if (performance.now()-transition.started < 320) realtimeVisualTimerRef.current=window.setTimeout(blend,16)
+        else { setRealtimeActive(false); setStreamReady(false) }
+      }
+      blend()
+    }
+    setRenderedAudio(undefined)
+    setRenderedVideo(undefined)
+    setAudioLevel(.13)
     setState('ready')
+    if (sessionId && apiOnline) await api.interrupt(sessionId).catch(() => undefined)
   }
 
   const toggleVoiceInput = () => {
@@ -1132,6 +1175,12 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       return
     }
     void startListening()
+  }
+
+  const changeVoiceMode = (mode: VoiceTurnMode) => {
+    setVoiceTurnMode(mode)
+    stopListening()
+    if (state === 'listening' || state === 'transcribing') setState('ready')
   }
 
   const isSpeaking = state === 'speaking'
@@ -1187,7 +1236,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             <p role="status">{feedbackStatus}</p>
           </details>
         </div>
-        {!wavTest && <><div className="voice-turn-mode" role="group" aria-label="음성 턴 방식"><button className={voiceTurnMode === 'push_to_talk' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('push_to_talk'); stopListening() }}>Push to talk</button><button className={voiceTurnMode === 'protected_auto_turn' ? 'selected' : ''} onClick={() => { setVoiceTurnMode('protected_auto_turn'); stopListening() }}>Protected auto turn</button></div>
+        {!wavTest && <><div className="voice-turn-mode" role="group" aria-label="음성 턴 방식"><button className={voiceTurnMode === 'push_to_talk' ? 'selected' : ''} onClick={() => changeVoiceMode('push_to_talk')}>Push to talk</button><button className={voiceTurnMode === 'protected_auto_turn' ? 'selected' : ''} onClick={() => changeVoiceMode('protected_auto_turn')}>Protected auto turn</button></div>
         <div className="voice-turn-note">{voiceTurnMode === 'push_to_talk' ? '마이크를 한 번 눌러 말하고, 다시 누르면 전송합니다.' : '아바타 발화가 끝난 0.8초 뒤 자동 청취 · 음성 후 1.1초 무음이면 전송합니다.'}</div>
         <div className="stage-controls"><button className="round-control" aria-label="대화 종료" onClick={onExit}><X size={20} /></button></div>
         </>}
@@ -1263,9 +1312,10 @@ function speak(result: TurnResponse, voiceName: string, setState: (value: LiveSt
   else { setState('ready'); setAudioLevel(0.13) }
 }
 
-async function beginMedia(ref: React.MutableRefObject<{ stream: MediaStream; context: AudioContext; frame: number } | null>, setLevel: (value: number) => void, onActivity?: (rms: number) => void) {
+async function beginMedia(ref: React.MutableRefObject<{ stream: MediaStream; context: AudioContext; frame: number } | null>, setLevel: (value: number) => void, onActivity?: (rms: number) => void, isCurrent = () => true) {
   if (ref.current) return
   const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+  if (!isCurrent()) { stream.getTracks().forEach(track => track.stop()); return }
   const context = new AudioContext()
   const source = context.createMediaStreamSource(stream)
   const analyser = context.createAnalyser()

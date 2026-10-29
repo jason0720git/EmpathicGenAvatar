@@ -6,7 +6,7 @@ import { api } from './api'
 
 vi.mock('./api', () => ({ApiError:class extends Error{},api: {
   avatars: vi.fn(), createSession: vi.fn(), prepareIdle: vi.fn(), endSession: vi.fn(),
-  sendTurn: vi.fn(), turnCaption: vi.fn(), telemetry: vi.fn(),
+  sendTurn: vi.fn(), turnCaption: vi.fn(), telemetry: vi.fn(), interrupt: vi.fn().mockResolvedValue(undefined),
   liveDiagnostics: vi.fn().mockResolvedValue({events:[]}),
 }}))
 let clock = 0
@@ -194,4 +194,41 @@ it('uses microphone speech cues while listening and clears them when capture sto
   await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 종료 및 전송"]')!.click())
   expect(stopTrack).toHaveBeenCalled()
   expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).not.toContain('/idle/3/')
+})
+
+it('ignores delayed recognition callbacks from the previous microphone session', async()=>{
+  const sessions: Recognition[]=[]
+  class Recognition {lang='';continuous=true;interimResults=true;onend?:()=>void;onresult?:(event:unknown)=>void;start(){sessions.push(this)} stop(){} }
+  vi.stubGlobal('SpeechRecognition',Recognition)
+  vi.stubGlobal('navigator',{mediaDevices:{getUserMedia:vi.fn().mockRejectedValue(new Error('no device'))}})
+  await act(async()=>root.render(<LiveRoom key="stale-mic" avatar={{id:'a',name:'Test',persona:'test',voice:'test',status:'ready',created_at:'',engine:'remote'}} method="ditto_realtime_trt10" sessionInstruction="test" apiOnline onExit={()=>{}}/>))
+  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 시작"]')!.click())
+  await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='Push to talk')!.click())
+  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 시작"]')!.click())
+  await act(async()=>sessions[0].onend?.())
+  // Cancelled recognizer must not change the current state or insert text.
+  await act(async()=>sessions[0].onresult?.({results:[{0:{transcript:'stale'},isFinal:true}]}))
+  expect(host.querySelector<HTMLTextAreaElement>('.composer textarea')!.value).not.toBe('stale')
+  expect(api.sendTurn).not.toHaveBeenCalled()
+  expect(host.querySelector('[aria-label="음성 입력 종료 및 전송"]')).not.toBeNull()
+})
+
+it('keeps the last speech composite visible briefly when interrupted',async()=>{
+  await act(async()=>root.render(null))
+  vi.stubGlobal('SpeechRecognition',class {start(){} stop(){}})
+  vi.stubGlobal('fetch',vi.fn(()=>Promise.resolve({ok:true,body:new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('--frame\r\nContent-Length: 1\r\n\r\nx\r\n'))}})})))
+  vi.stubGlobal('requestAnimationFrame',(cb:FrameRequestCallback)=>window.setTimeout(()=>cb(performance.now()),16))
+  vi.stubGlobal('cancelAnimationFrame',(id:number)=>window.clearTimeout(id))
+  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({canvas:{width:512,height:512},drawImage:draw,save:vi.fn(),restore:vi.fn(),translate:vi.fn(),globalAlpha:1} as unknown as CanvasRenderingContext2D)
+  await act(async()=>root.render(<LiveRoom key="interrupt" avatar={{id:'a',name:'Test',persona:'test',voice:'test',status:'ready',created_at:'',engine:'remote'}} method="ditto_realtime_trt10" sessionInstruction="test" apiOnline onExit={()=>{}}/>))
+  await act(async()=>vi.advanceTimersByTimeAsync(50))
+  await send()
+  await act(async()=>{socket.onopen?.();packet(2,0);packet(1,1000);packet(2,1000)})
+  clock=.21
+  await act(async()=>vi.advanceTimersByTimeAsync(250))
+  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 시작"]')!.click())
+  expect(api.interrupt).toHaveBeenCalledWith('s')
+  expect(host.querySelector('canvas.rendered-avatar-video.visible')).not.toBeNull()
+  await act(async()=>vi.advanceTimersByTimeAsync(400))
+  expect(host.querySelector('canvas.rendered-avatar-video')).toBeNull()
 })

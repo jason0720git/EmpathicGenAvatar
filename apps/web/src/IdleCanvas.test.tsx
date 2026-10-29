@@ -45,7 +45,7 @@ it('paints the newest burst frame on the snapshot canvas and aborts on unmount',
   const bitmap={width:120,height:160,close:vi.fn()}
   vi.stubGlobal('createImageBitmap',vi.fn().mockResolvedValue(bitmap))
   const draw=vi.fn()
-  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({drawImage:draw} as unknown as CanvasRenderingContext2D)
+  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({canvas:{width:120,height:160},drawImage:draw} as unknown as CanvasRenderingContext2D)
   let signal:AbortSignal
   const stream=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new Uint8Array([...packet([1]),...packet([2])]))}})
   vi.stubGlobal('fetch',vi.fn((_url,options)=>{signal=options.signal; return Promise.resolve({ok:true,body:stream})}))
@@ -72,7 +72,7 @@ it('parks on the first frame and restarts from the boundary when unparked', asyn
   vi.stubGlobal('requestAnimationFrame',vi.fn((callback:FrameRequestCallback)=>{paint=callback;return 1}))
   vi.stubGlobal('cancelAnimationFrame',vi.fn())
   const draw=vi.fn(), closed=vi.fn(), decoded:Blob[]=[]
-  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({drawImage:draw} as unknown as CanvasRenderingContext2D)
+  vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({canvas:{width:96,height:120},drawImage:draw,save:vi.fn(),restore:vi.fn()} as unknown as CanvasRenderingContext2D)
   vi.stubGlobal('createImageBitmap',vi.fn((blob:Blob)=>{decoded.push(blob);return Promise.resolve({width:96,height:120,close:closed})}))
   const cancel=vi.fn()
   vi.stubGlobal('fetch',vi.fn(()=>Promise.resolve({ok:true,body:new ReadableStream({start(c){c.enqueue(new Uint8Array([...packet([1]),...packet([2,2])]))},cancel})})))

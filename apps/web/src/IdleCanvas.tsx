@@ -1,4 +1,6 @@
 import { useEffect, useRef, type RefObject } from 'react'
+import { beginTransition, drawTransition } from './avatarTransition'
+import { GeometryHandoff } from './geometryHandoff'
 
 // Explicitly decode the same JPEGs as speech. Native <img> MJPEG presentation
 // has no exposed frame clock; its canvas snapshot need not be the displayed
@@ -44,6 +46,11 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
     let paintId = 0
     let ready = false
     let ended = false
+    const previous = canvasRef.current
+    let transition = previous?.dataset.painted
+      ? beginTransition(previous,previous,previous.width,previous.height,0,false) : null
+    if (transition) { transition.geometry=new GeometryHandoff(); transition.mixMs=320 }
+    let transitionStarted = false
     // Retain the painted image while reconnecting. During speech fetch only
     // frame zero (the shared source-pose anchor), not an arbitrary idle phase.
     if (!canvasRef.current?.dataset.painted) onReady(false)
@@ -56,7 +63,12 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
         if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
           canvas.width = bitmap.width; canvas.height = bitmap.height
         }
-        canvas.getContext('2d')?.drawImage(bitmap, 0, 0)
+        const ctx = canvas.getContext('2d')
+        if (ctx && transition) {
+          if (!transitionStarted) { transition.started=performance.now(); transitionStarted=true }
+          drawTransition(ctx,bitmap,transition,performance.now())
+          if (performance.now()-transition.started>=320) transition=null
+        } else ctx?.drawImage(bitmap, 0, 0)
         canvas.dataset.painted = 'true'
         canvas.dataset.parked = String(parked)
         if (!ready) { ready = true; onReady(true) }

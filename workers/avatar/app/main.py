@@ -196,12 +196,14 @@ class BlinkAwareMotionStitch:
         self.boundary_preroll = 0
         self.speech_timeline = None
         self.speech_gain = 0.0
+        self.last_speech_pupil = None
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
 
     def setup(self, *args, **kwargs):
         self.boundary_timeline = None
         self.speech_timeline = None
         self.speech_gain = 0.0
+        self.last_speech_pupil = None
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
         return self.inner.setup(*args, **kwargs)
 
@@ -228,6 +230,14 @@ class BlinkAwareMotionStitch:
             # Modulate selected affect only; preserve independent pupil intent.
             affect_points = [i for i in range(21) if i not in PROTECTED_EYE_POINTS]
             adjusted[affect_points] *= self.speech_gain
+            # Streaming allocation is provisional. A short actual response can
+            # end mid-glance: return pupil intent during its known silent tail.
+            if rms is not None:
+                self.last_speech_pupil = adjusted[[11, 15]].copy()
+            else:
+                # Do not start a scheduled glance after speech already ended.
+                adjusted[[11, 15]] = self.last_speech_pupil if self.last_speech_pupil is not None else 0
+            adjusted[[11, 15]] *= self.speech_timeline.boundary_weight(frame)
             kwargs["delta_exp"] = adjusted.reshape(1,63)
         protect = kwargs.pop("preserve_speech_lips", False)
         smile_corners = kwargs.pop("allow_smile_corners", False)

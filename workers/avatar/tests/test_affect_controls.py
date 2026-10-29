@@ -120,11 +120,36 @@ def test_sobia_envelope_uses_current_pcm_and_keeps_pupil_intent():
     adapter=BlinkAwareMotionStitch(Stitch());adapter.set_speech_timeline(timeline,0)
     delta=np.ones((1,63),np.float32)*.001
     first=adapter(None,None,delta_exp=delta).reshape(21,3)
-    assert first[1,0]==0 and first[11,0]==delta[0,33]
+    assert first[1,0]==0 and first[11,0]==0
     active=adapter(None,None,delta_exp=delta).reshape(21,3)
     assert 0<active[1,0]<.001 and active[11,0]==delta[0,33]
     assert np.all(delta==.001)
     timeline.cancel();assert timeline.frame_rms(1) is None
+
+
+def test_short_stream_returns_pupil_during_actual_tail_not_provisional_length():
+    from app.main import BlinkAwareMotionStitch, RealtimePcmTimeline
+    class Stitch:
+        idx=25
+        def __call__(self, source, driving, **kwargs):
+            self.idx+=1
+            return kwargs['delta_exp'].reshape(21,3)[11,0]
+    timeline=RealtimePcmTimeline(25,25)
+    timeline.append(np.full(640*10,8000,np.int16))
+    timeline.finish()
+    wrapper=BlinkAwareMotionStitch(Stitch());wrapper.set_speech_timeline(timeline,0)
+    delta=np.ones((1,63),np.float32)*.001
+    values=[wrapper(None,None,delta_exp=delta) for _ in range(35)]
+    assert np.allclose(values[:11],.001)
+    assert values[-1]==0
+    assert all(a>=b for a,b in zip(values[10:],values[11:]))
+
+    # A glance scheduled only in silence must not start after a short reply.
+    stitch=Stitch();stitch.idx=25
+    wrapper=BlinkAwareMotionStitch(stitch);wrapper.set_speech_timeline(timeline,0)
+    zero=np.zeros((1,63),np.float32)
+    for _ in range(10): assert wrapper(None,None,delta_exp=zero)==0
+    for _ in range(25): assert wrapper(None,None,delta_exp=delta)==0
 
 
 def test_affect_intensity_blends_ditto_emotion_from_neutral() -> None:
