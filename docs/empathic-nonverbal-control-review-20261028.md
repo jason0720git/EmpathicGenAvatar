@@ -1,5 +1,7 @@
 # 공감 비언어행동 중심 재검토
 
+> **2026-10-29 이력 추적 정정:** Ditto에 LivePortrait의 제어를 처음 연결해야 한다는 앞선 설명은 부정확했다. `a21b275`(2026-09-17, 표정 적용)에서 smile/brow/lip 편집을 Ditto의 `(1,63)` `delta_exp`로 이미 이식하고 v2→v3→v5 렌더 검증을 수행했다. 현재 `native8-speech-protected-v5-smile` 코드에도 적용되어 있다. 남은 제어 범위는 외부 입력에 따른 독립 눈동자 방향 등이며, 눈꺼풀 열림·깜빡임 보정까지 미구현인 것은 아니다. 근거: [v2](native8-expression-presets.md), [v3](native8-expression-v3.md), [v5](expression-v5-smile-and-concurrency.md), [rest-mouth](rest-mouth-calibration.md).
+
 2026-10-28. 사용자가 명확히 한 우선순위: **얼굴 표정·눈의 움직임·머리 움직임을 원하는 시점과 강도로 조절하는 것이 핵심이며, 전신은 발화와 무관한 반복 모션이어도 된다.** 이 문서는 같은 날의 [전신 기술 조사](full-body-avatar-technology-review-20261028.md)의 적용 우선순위를 수정한다. 신규 모델 실행이나 제어 기능 구현은 수행하지 않았다.
 
 ## 1. 수정된 추천
@@ -13,7 +15,7 @@
 | 후보/경로 | 새 목표에 대한 위치 | 구체적인 이유 |
 |---|---|---|
 | 현재 LAM + 명시적 face/eye/head 제어 | **3D 제어 실험의 출발점** | ARKit eyeLook/eyeBlink, 표정, head 값을 이미 전달. 다만 입력 전달과 화면상의 올바른 동작은 별도 |
-| Ditto + LivePortrait retargeting 확장 | **영상 경로의 첫 실험** | 기존 립싱크를 유지하면서 시선/눈꺼풀/표정/머리 제어를 추가하는 직접적인 경로 |
+| Ditto + 기존 LivePortrait 유래 제어 | **기존 구현을 기준으로 검증·확장** | 표정·눈꺼풀·고개 제어는 이미 이식. 독립 눈동자 방향과 제어 간섭을 다음 대상으로 선정 |
 | STEER | **가장 목적에 가까운 신규 연구 후보** | 경청/발화, 시선 맞춤/회피, 고개 리듬, 감정을 분리. 가중치 공개 및 렌더러 연결은 미해결 |
 | ELITE | **얼굴 외형·표정 품질 비교 후보** | 짧은 단안 영상 기반 개인화, 시선/윙크의 개선을 저자가 제시. 정확한 임의 목표 시선 제어는 별도 검증 |
 | FastAvatar / FlexAvatar / CAP4D | 얼굴 자산 품질 보조 후보 | 외형 재구성이 좋아져도 직접적인 눈 제어가 보장되지는 않음 |
@@ -32,7 +34,7 @@
 
 공식 현재 저장소에서도 동일 코드를 확인했다. 저장소 주소는 KwaiVGI에서 KlingAIResearch로 이동했다. [공식 retargeting 코드](https://github.com/KlingAIResearch/LivePortrait/blob/main/src/gradio_pipeline.py)
 
-**제안:** Ditto가 생성한 발화 모션에 별도 제어 계층의 눈/표정/고개 값을 합성한 뒤 한 번의 warp/decode로 렌더하는 실험을 먼저 한다. LivePortrait 함수를 그대로 복사해 성공한다고 가정하지 않는다. 두 파이프라인의 좌표·중립값·stitch 순서·기존 blink 합성·출력 감도를 확인하고 캐릭터별로 교정해야 한다.
+**수정된 제안:** 이미 구현된 Ditto 발화 모션 + LivePortrait 유래 표정 residual + blink-aware/speech-safe 보정을 출발점으로 한다. 두 독립 영상 생성기를 직렬 실행하는 방식이 아니라 Ditto 내부 motion/stitch 단계에서 합성하는 구조다. 기존 구현을 다시 만들지 않고, 눈동자 방향의 별도 입력과 head/gaze 분리부터 검증한다. Ditto 자체에도 `drive_eye`, blink schedule, `_fix_gaze`/`_eye_delta`가 있으므로 외부 LivePortrait 모델을 새로 실행해야 한다고 전제하지 않는다. 캐릭터별 좌표·중립값·stitch/자동 gaze 보정 순서와 간섭을 확인한다.
 
 특히 LivePortrait의 눈 X/Y 값은 **보정된 3D gaze 각도 또는 공간상의 목표 좌표가 아니다**. Y 편집에는 눈꺼풀 보정도 포함된다. “명령 인터페이스가 있다”, “독립적이고 정확한 시선 제어가 된다”는 서로 다른 주장이다. 고정 머리 자세에서 좌우/상하 눈 이동, 눈 감김과 결합, 발화 중 립싱크 보존을 검사해야 한다.
 
