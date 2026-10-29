@@ -62,6 +62,7 @@ class HeadPose(BaseModel):
 
 
 class GazeIntent(BaseModel):
+    mode: Literal["head_cue", "pupil"] = "head_cue"
     x: float = Field(default=0, ge=-1, le=1)
     y: float = Field(default=0, ge=-1, le=1)
 
@@ -91,9 +92,12 @@ DITTO_EMOTION_INDEX = {name: index for index, name in enumerate(
 PRESET_VERSION = "native8-speech-protected-v5-smile"
 # Based on vendor/LivePortrait/src/gradio_pipeline.py's smile, eyebrow and
 # lip-variation controls. Ditto uses 21 implicit 3D keypoints, flattened to 63.
-# Keep pupil controls untouched. Only calibrated positive y offsets at 13/16
+# Affect presets keep pupil controls untouched; explicit pupil mode is separate.
+# Only calibrated positive y offsets at 13/16
 # widen lids; the adapter below attenuates those offsets during native blinks.
 PROTECTED_EYE_POINTS = (11, 15, 18)
+PUPIL_CONTROL_POINTS = (11, 15)
+GAZE_CONTROL_VERSION = "liveportrait-pupil-opt-in-v1"
 LID_CONTROL_POINTS = (13, 16)
 SPEECH_LIP_POINTS = (6, 12, 14, 17, 19, 20)
 SPEECH_CENTER_POINTS = (6, 12, 17, 19)
@@ -225,7 +229,8 @@ class BlinkAwareMotionStitch:
         delta = kwargs.get("delta_exp")
         blink = getattr(self.inner, "delta_eye_arr", None)
         schedule = getattr(self.inner, "delta_eye_idx_list", None)
-        if (delta is not None and np.any(delta.reshape(21, 3)[list(LID_CONTROL_POINTS), 1])
+        if (delta is not None and (np.any(delta.reshape(21, 3)[list(LID_CONTROL_POINTS), 1])
+                                  or np.any(delta.reshape(21, 3)[list(PUPIL_CONTROL_POINTS)]))
                 and blink is not None and schedule is not None and len(schedule)
                 and getattr(self.inner, "drive_eye", False)):
             norms = np.linalg.norm(np.asarray(blink).reshape(len(blink), -1), axis=1)
@@ -235,6 +240,7 @@ class BlinkAwareMotionStitch:
                 weight = float(np.clip(1 - norms[index] / peak, 0, 1))
                 adjusted = delta.copy().reshape(21, 3)
                 adjusted[list(LID_CONTROL_POINTS), 1] *= weight
+                adjusted[list(PUPIL_CONTROL_POINTS)] *= weight
                 kwargs["delta_exp"] = adjusted.reshape(1, 63)
         result = self.inner(x_s_info, x_d_info, **kwargs)
         if baseline is not None:
@@ -286,18 +292,38 @@ DITTO_TURN_LEAD_FRAMES = 25
 DITTO_TURN_TAIL_FRAMES = 25
 
 
+def pupil_gaze_delta(gaze: GazeIntent) -> np.ndarray:
+    """Conservative LivePortrait implicit pupil offsets, not gaze-angle tracking.
+
+    Preserve upstream asymmetric horizontal coefficients and the net vertical
+    pupil coefficient (-.0005) after its blink compensation. Omit its extra
+    lid deformation: native Ditto blinks and calibrated affect own the lids.
+    Normalized intent maps to +/-4 upstream slider units, NOT degrees.
+    """
+    delta = np.zeros((21, 3), dtype=np.float32)
+    if gaze.mode == "pupil":
+        x, y = gaze.x * 4.0, gaze.y * 4.0
+        delta[11, 0] = x * (0.0007 if x > 0 else 0.001)
+        delta[15, 0] = x * (0.001 if x > 0 else 0.0007)
+        delta[[11, 15], 1] = y * -0.0005
+    return delta.reshape(1, 63)
+
+
 def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0, hold_expression_end: bool = False) -> dict[int, dict[str, float | np.ndarray]]:
     """Convert safe turn-level controls into Ditto's documented frame controls.
 
-    Ditto accepts pose offsets in degrees. Its public online API does not expose
-    an independent numeric eye-gaze vector, so v0.1 turns gaze intent into a
-    deliberately small head cue rather than pretending it controls pupils.
+    Legacy head cues remain the default. Opt-in pupil intent is independent
+    of head offsets and affect intensity, with a smooth onset/release.
     """
-    gaze_yaw = plan.gaze.x * 3.0
-    gaze_pitch = -plan.gaze.y * 2.0
+    if frame_count <= 0:
+        return {}
+    if fps <= 0 or frame_offset < 0:
+        raise ValueError("fps must be positive and frame_offset nonnegative")
+    gaze_yaw = plan.gaze.x * 3.0 if plan.gaze.mode == "head_cue" else 0.0
+    gaze_pitch = -plan.gaze.y * 2.0 if plan.gaze.mode == "head_cue" else 0.0
     base = {
-        "delta_yaw": plan.head.yaw_deg + gaze_yaw,
-        "delta_pitch": plan.head.pitch_deg + gaze_pitch,
+        "delta_yaw": float(np.clip(plan.head.yaw_deg + gaze_yaw, -12, 12)),
+        "delta_pitch": float(np.clip(plan.head.pitch_deg + gaze_pitch, -10, 10)),
         "delta_roll": plan.head.roll_deg,
     }
     total_frames = frame_count + frame_offset
@@ -333,18 +359,30 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
                 seconds = visible_frame / fps
                 residual *= 0.85 + 0.15 * np.exp(-max(0.0, seconds - 0.5) / 0.7)
             controls[frame]["delta_exp"] = residual
+    gaze_delta = pupil_gaze_delta(plan.gaze)
+    if np.any(gaze_delta):
+        ramp_frames = max(2, round(.24 * fps))
+        for frame in range(frame_offset, total_frames):
+            attack = min(1.0, (frame - frame_offset) / ramp_frames)
+            release = 1.0 if hold_expression_end else min(1.0, (total_frames - 1 - frame) / ramp_frames)
+            phase = min(attack, release)
+            weight = phase * phase * (3 - 2 * phase)
+            controls[frame]["delta_exp"] = controls[frame].get("delta_exp", 0) + gaze_delta * weight
     if plan.nod is None:
         return controls
 
-    start_frame = min(total_frames - 1, frame_offset + round(plan.nod.start_ms / 1_000 * fps))
+    start_frame = frame_offset + round(plan.nod.start_ms / 1_000 * fps)
     duration_frames = max(2, round(plan.nod.duration_ms / 1_000 * fps))
-    end_frame = min(total_frames, start_frame + duration_frames)
+    end_frame = start_frame + duration_frames
+    # A short utterance must not squeeze a planned nod into a few frames.
+    if end_frame > total_frames:
+        return controls
     for frame in range(start_frame, end_frame):
         phase = (frame - start_frame) / max(1, end_frame - start_frame - 1)
         # Smooth 0 → peak → 0 pitch envelope. The amplitude is bounded by
         # NodIntent, so camera-derived noise cannot create a violent motion.
-        envelope = float(np.sin(np.pi * phase))
-        controls[frame]["delta_pitch"] = base["delta_pitch"] + plan.nod.amplitude_deg * envelope
+        envelope = float(np.sin(np.pi * phase) ** 2)
+        controls[frame]["delta_pitch"] = float(np.clip(base["delta_pitch"] + plan.nod.amplitude_deg * envelope, -10, 10))
     return controls
 
 
@@ -1575,6 +1613,13 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             },
             "head_deg": motion_plan.head.model_dump(mode="json"),
             "gaze": motion_plan.gaze.model_dump(mode="json"),
+            "gaze_control": {"version": GAZE_CONTROL_VERSION, "mode": motion_plan.gaze.mode,
+                             "pupil_points": list(PUPIL_CONTROL_POINTS) if motion_plan.gaze.mode == "pupil" else [],
+                             "validation_scope": "experimental_single_source_static", "native_pose_compensation": True},
+            "applied_head_offset_ranges": {
+                axis: [min(c[axis] for c in ctrl_info.values()), max(c[axis] for c in ctrl_info.values())]
+                for axis in ("delta_yaw", "delta_pitch", "delta_roll")
+            },
             "nod": motion_plan.nod.model_dump(mode="json") if motion_plan.nod else None,
         }
         record_ditto_affect_diagnostic(self.config.data_root, affect_diagnostic)

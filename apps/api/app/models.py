@@ -96,12 +96,13 @@ class HeadPose(BaseModel):
 
 
 class GazeIntent(BaseModel):
-    """Semantic gaze target for renderer adapters; Ditto v0 uses a small head cue.
+    """Gaze intent: legacy head cue or opt-in LivePortrait pupil residual.
 
     ``y=-1`` is a downward cue and ``y=1`` an upward cue.  These values are
     avatar-relative intent, never camera-derived user measurements.
     """
 
+    mode: Literal["head_cue", "pupil"] = "head_cue"
     x: float = Field(default=0, ge=-1, le=1)
     y: float = Field(default=0, ge=-1, le=1)
 

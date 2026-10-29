@@ -141,7 +141,7 @@ def test_turn_accepts_bounded_motion_plan(tmp_path):
                     "expression": "sad",
                     "intensity": 0.5,
                     "head": {"yaw_deg": 3, "pitch_deg": 0, "roll_deg": 0},
-                    "gaze": {"x": 0, "y": 0},
+                    "gaze": {"mode": "pupil", "x": 0.25, "y": -0.5},
                     "nod": {"start_ms": 300, "duration_ms": 460, "amplitude_deg": 5},
                 },
                 "motion_override": True,
@@ -151,6 +151,7 @@ def test_turn_accepts_bounded_motion_plan(tmp_path):
         applied = response.json()["renderer"]["applied_motion"]
         assert applied["expression"] == "sad"
         assert applied["nod"]["amplitude_deg"] == 5
+        assert applied["gaze"] == {"mode": "pupil", "x": 0.25, "y": -0.5}
 
 
 def test_demo_backend_uses_declared_neutral_fallback_without_text_classification(tmp_path):

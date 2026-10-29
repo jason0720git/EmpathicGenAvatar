@@ -5,6 +5,71 @@ import numpy as np
 from app.main import MotionPlan, build_ditto_ctrl_info, build_ditto_emotion_condition, DITTO_EMOTION_INDEX, DITTO_AFFECT_DELTA_EXP, PROTECTED_EYE_POINTS
 
 
+def test_pupil_gaze_is_independent_of_pose_and_emotion():
+    from app.main import GazeIntent, HeadPose
+    for mode in ('off', 'native', 'legacy', 'speech_safe'):
+        plan = MotionPlan(intensity=0, expression_render_mode=mode,
+                          head=HeadPose(yaw_deg=2, pitch_deg=-1),
+                          gaze=GazeIntent(mode='pupil', x=1, y=-1))
+        controls = build_ditto_ctrl_info(plan, 40, frame_offset=13)
+        assert all(c['delta_yaw'] == 2 and c['delta_pitch'] == -1 for c in controls.values())
+        assert all('delta_exp' not in controls[i] for i in range(13))
+        assert not np.any(controls[13]['delta_exp'])
+        assert not np.any(controls[52]['delta_exp'])
+        delta = controls[25]['delta_exp'].reshape(21, 3)
+        assert np.all(delta[[11, 15], :2] > 0)
+        assert np.max(np.abs(delta)) <= .00401
+        assert not np.any(np.delete(delta, [11, 15], axis=0))
+
+
+def test_pupil_gaze_composes_with_affect_without_changing_lips_or_brows():
+    from app.main import GazeIntent
+    for name in DITTO_EMOTION_INDEX:
+        baseline = build_ditto_ctrl_info(MotionPlan(expression=name), 60)[20]
+        with_gaze = build_ditto_ctrl_info(MotionPlan(expression=name, gaze=GazeIntent(mode='pupil', x=-.5, y=.5)), 60)[20]
+        difference = (with_gaze['delta_exp'] - baseline.get('delta_exp', 0)).reshape(21, 3)
+        assert not np.any(np.delete(difference, [11, 15], axis=0))
+        assert np.all(difference[[11, 15], :2] < 0)
+
+
+def test_blink_suppresses_pupil_residual_and_preserves_control_cache():
+    from app.main import BlinkAwareMotionStitch, GazeIntent, pupil_gaze_delta
+    class Stitch:
+        delta_eye_arr = np.array([np.zeros(63), np.ones(63)], np.float32)
+        delta_eye_idx_list = [0, 1]
+        drive_eye = True
+        idx = 1
+        def __call__(self, source, driving, **kwargs):
+            return kwargs['delta_exp']
+    inner = Stitch()
+    delta = pupil_gaze_delta(GazeIntent(mode='pupil', x=1, y=1))
+    original = delta.copy()
+    adapter = BlinkAwareMotionStitch(inner)
+    assert not np.any(adapter(None, None, delta_exp=delta))
+    assert np.array_equal(delta, original)
+    inner.idx = 0
+    assert np.array_equal(adapter(None, None, delta_exp=delta), original)
+
+
+def test_combined_head_cues_and_nods_stay_within_offset_limits():
+    from app.main import HeadPose, GazeIntent, NodIntent
+    plan = MotionPlan(head=HeadPose(yaw_deg=12, pitch_deg=10),
+                      gaze=GazeIntent(x=1, y=-1), nod=NodIntent(start_ms=0, amplitude_deg=8))
+    controls = build_ditto_ctrl_info(plan, 60)
+    assert all(abs(c['delta_yaw']) <= 12 and abs(c['delta_pitch']) <= 10 for c in controls.values())
+
+
+def test_short_turn_does_not_compress_or_reschedule_nod():
+    from app.main import NodIntent
+    plan = MotionPlan(nod=NodIntent(start_ms=300, duration_ms=460))
+    short = build_ditto_ctrl_info(plan, 10, frame_offset=13)
+    assert all(c['delta_pitch'] == 0 for c in short.values())
+    long = build_ditto_ctrl_info(plan, 60, frame_offset=13)
+    assert any(c['delta_pitch'] > 0 for c in long.values())
+    assert all(long[i]['delta_pitch'] == 0 for i in range(21))
+    assert build_ditto_ctrl_info(plan, 0) == {}
+
+
 def test_affect_intensity_blends_ditto_emotion_from_neutral() -> None:
     neutral = build_ditto_emotion_condition(MotionPlan(expression="happy", intensity=0), 4)
     joy = build_ditto_emotion_condition(MotionPlan(expression="happy", intensity=1, expression_render_mode="native"), 4)

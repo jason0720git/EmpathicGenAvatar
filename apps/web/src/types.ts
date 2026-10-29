@@ -56,6 +56,7 @@ export interface MotionPlan {
     roll_deg: number
   }
   gaze: {
+    mode?: 'head_cue' | 'pupil'
     x: number
     y: number
   }
