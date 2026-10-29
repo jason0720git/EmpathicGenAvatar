@@ -76,12 +76,19 @@ class BehaviorPlanner:
         elif affect.emotion == "surprise":
             head = HeadPose(pitch_deg=-0.55 * intensity)
 
+        if not expression_test:
+            # SOBIA channel ownership: head posture is separate from pupil gaze.
+            # One restrained glance returns to center; never infer agreement.
+            gaze = GazeIntent(mode="pupil", pattern="avert_return", x=.3,
+                              y=-.15 * intensity if affect.emotion == "sad" else -.04)
+
         return BehaviorDecision(
             affect=affect,
             motion_plan=MotionPlan(
                 expression=affect.emotion,
                 intensity=intensity,
                 expression_test=expression_test,
+                temporal_policy="steady" if expression_test else "sobia",
                 head=head,
                 gaze=gaze,
                 nod=nod,
@@ -92,7 +99,9 @@ class BehaviorPlanner:
     def fallback(self) -> BehaviorDecision:
         """Use only when a non-Realtime backend has no affect tool contract."""
 
-        return self.from_affect(AffectIntent(emotion="neutral", intensity=0), source="backend_neutral_fallback")
+        return BehaviorDecision(affect=AffectIntent(emotion="neutral", intensity=0),
+                                motion_plan=MotionPlan(expression="neutral", intensity=0),
+                                source="backend_neutral_fallback")
 
     def resolve(self, *, affect: AffectIntent | None, requested: MotionPlan | None, motion_override: bool) -> BehaviorDecision:
         """Keep an explicit operator override without reviving text policy."""

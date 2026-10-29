@@ -56,12 +56,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ avatar_id: avatarId, renderer_method: rendererMethod, session_instruction: sessionInstruction, mode }),
     }),
-  sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe', observation?: {use_observation:boolean;observation_window_ms:number;observation_speaking:boolean;observation_end_age_ms:number}) => {
+  sendTurn: (sessionId: string, text: string, affectOverride?: AffectIntent, clientTurnId?: string, expressionRenderMode?: 'off' | 'native' | 'legacy' | 'speech_safe', observation?: {use_observation:boolean;observation_window_ms:number;observation_speaking:boolean;observation_end_age_ms:number}, gazeOverride?: MotionPlan["gaze"]) => {
     // Auto intentionally omits affect_override, so only that path invokes
     // the Realtime affect tool. Manual evaluation sends two bounded fields.
     const body = {
       text,
       ...observation,
+      ...(gazeOverride ? {gaze_override: gazeOverride} : {}),
       client_turn_id: clientTurnId,
       ...(expressionRenderMode ? { expression_render_mode: expressionRenderMode } : {}),
       ...(affectOverride ? { affect_override: affectOverride } : {}),

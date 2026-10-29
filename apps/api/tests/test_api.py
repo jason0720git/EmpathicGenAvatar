@@ -151,7 +151,7 @@ def test_turn_accepts_bounded_motion_plan(tmp_path):
         applied = response.json()["renderer"]["applied_motion"]
         assert applied["expression"] == "sad"
         assert applied["nod"]["amplitude_deg"] == 5
-        assert applied["gaze"] == {"mode": "pupil", "x": 0.25, "y": -0.5}
+        assert applied["gaze"] == {"mode": "pupil", "pattern": "hold", "x": 0.25, "y": -0.5}
 
 
 def test_demo_backend_uses_declared_neutral_fallback_without_text_classification(tmp_path):
@@ -318,3 +318,19 @@ def test_timing_telemetry_persists_no_conversation_content(tmp_path):
         saved = (tmp_path / "data" / "telemetry" / "turn-events.jsonl").read_text(encoding="utf-8")
         assert "turn-123" in saved
         assert "conversation" not in saved
+
+
+def test_gaze_override_preserves_selected_affect(tmp_path):
+    with client_for(tmp_path) as client:
+        avatar = create_avatar(client)
+        session = client.post('/api/live/sessions', json={'avatar_id': avatar['id']}).json()
+        response = client.post(f"/api/live/sessions/{session['id']}/turns", json={
+            'text': 'Test gaze', 'affect_override': {'emotion': 'happy', 'intensity': .5},
+            'gaze_override': {'mode': 'pupil', 'pattern': 'avert_return', 'x': .6, 'y': -.1}})
+        assert response.status_code == 200, response.text
+        motion = response.json()['renderer']['applied_motion']
+        assert motion['expression'] == 'happy' and motion['intensity'] == .5
+        assert motion['gaze']['pattern'] == 'avert_return'
+        bad = client.post(f"/api/live/sessions/{session['id']}/turns", json={
+            'text': 'Test gaze', 'gaze_override': {'mode': 'pupil', 'x': 5}})
+        assert bad.status_code == 422

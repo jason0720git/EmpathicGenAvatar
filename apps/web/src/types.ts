@@ -57,6 +57,7 @@ export interface MotionPlan {
   }
   gaze: {
     mode?: 'head_cue' | 'pupil'
+    pattern?: 'hold' | 'avert_return'
     x: number
     y: number
   }

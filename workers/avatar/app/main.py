@@ -39,7 +39,7 @@ class PrepareIn(BaseModel):
 class IdleIn(PrepareIn):
     """One-shot full-frame idle-loop preparation for an approved avatar."""
 
-    variants: int = Field(default=3, ge=1, le=3)
+    variants: int = Field(default=5, ge=1, le=5)
 
 
 class RenderIn(BaseModel):
@@ -63,6 +63,7 @@ class HeadPose(BaseModel):
 
 class GazeIntent(BaseModel):
     mode: Literal["head_cue", "pupil"] = "head_cue"
+    pattern: Literal["hold", "avert_return"] = "hold"
     x: float = Field(default=0, ge=-1, le=1)
     y: float = Field(default=0, ge=-1, le=1)
 
@@ -80,6 +81,7 @@ class MotionPlan(BaseModel):
     intensity: float = Field(default=0.35, ge=0, le=1)
     expression_test: bool = False
     expression_render_mode: Literal["off", "native", "legacy", "speech_safe"] = "speech_safe"
+    temporal_policy: Literal["steady", "sobia"] = "steady"
     head: HeadPose = Field(default_factory=HeadPose)
     gaze: GazeIntent = Field(default_factory=GazeIntent)
     nod: NodIntent | None = None
@@ -192,10 +194,14 @@ class BlinkAwareMotionStitch:
         self.rest_mouth_gain = float(np.clip(rest_mouth_gain, 0, 2))
         self.boundary_timeline = None
         self.boundary_preroll = 0
+        self.speech_timeline = None
+        self.speech_gain = 0.0
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
 
     def setup(self, *args, **kwargs):
         self.boundary_timeline = None
+        self.speech_timeline = None
+        self.speech_gain = 0.0
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
         return self.inner.setup(*args, **kwargs)
 
@@ -203,10 +209,26 @@ class BlinkAwareMotionStitch:
         self.boundary_timeline = timeline
         self.boundary_preroll = preroll
 
+    def set_speech_timeline(self, timeline, preroll):
+        self.speech_timeline = timeline
+        self.speech_preroll = preroll
+
     def __getattr__(self, name):
         return getattr(self.inner, name)
 
     def __call__(self, x_s_info, x_d_info, **kwargs):
+        if self.speech_timeline is not None and "delta_exp" in kwargs:
+            frame = self.inner.idx - self.speech_preroll
+            rms = self.speech_timeline.frame_rms(frame)
+            energy = float(np.clip((20*np.log10(max(rms or 0, 1e-7))+54)/35, 0, 1))
+            target = (0.70 + .30*energy) if rms is not None else 0.0
+            tau = .18 if target > self.speech_gain else .32
+            self.speech_gain += (target-self.speech_gain)*(1-np.exp(-.04/tau))
+            adjusted = kwargs["delta_exp"].copy().reshape(21,3)
+            # Modulate selected affect only; preserve independent pupil intent.
+            affect_points = [i for i in range(21) if i not in PROTECTED_EYE_POINTS]
+            adjusted[affect_points] *= self.speech_gain
+            kwargs["delta_exp"] = adjusted.reshape(1,63)
         protect = kwargs.pop("preserve_speech_lips", False)
         smile_corners = kwargs.pop("allow_smile_corners", False)
         boundary_alpha = kwargs.pop("boundary_alpha", None)
@@ -281,7 +303,7 @@ DITTO_CHUNKSIZE = (3, 5, 2)
 DITTO_PREROLL_FRAMES = 13
 # Increment whenever the generated idle media semantics change, so existing
 # cached loops cannot mask a behavior fix in a browser session.
-IDLE_ASSET_VERSION = 11  # Shared relaxed contour; 7-10 exist from older experiments.
+IDLE_ASSET_VERSION = 13  # Add short, source-anchored acoustic response clips.
 IDLE_FPS = 25
 IDLE_FRAME_COUNT = 400  # 16 seconds, not a slowed-down 8-second clip
 # Real talking turns reserve a small silent motion bridge at each edge. The
@@ -307,6 +329,19 @@ def pupil_gaze_delta(gaze: GazeIntent) -> np.ndarray:
         delta[15, 0] = x * (0.001 if x > 0 else 0.0007)
         delta[[11, 15], 1] = y * -0.0005
     return delta.reshape(1, 63)
+
+
+def gaze_aversion_weight(seconds: float, start: float = 2.0) -> float:
+    """A single brief glance: 360ms outward, 440ms hold, 600ms return.
+
+    Timing is an engineering preset, not inferred attention or a clinical rule.
+    Outside the event the additional pupil offset is exactly zero.
+    """
+    t = seconds - start
+    if t < 0 or t >= 1.4:
+        return 0.0
+    phase = min(1.0, t / .36, (1.4 - t) / .60)
+    return float(phase * phase * (3 - 2 * phase))
 
 
 def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, frame_offset: int = 0, hold_expression_end: bool = False) -> dict[int, dict[str, float | np.ndarray]]:
@@ -367,6 +402,9 @@ def build_ditto_ctrl_info(plan: MotionPlan, frame_count: int, fps: int = 25, fra
             release = 1.0 if hold_expression_end else min(1.0, (total_frames - 1 - frame) / ramp_frames)
             phase = min(attack, release)
             weight = phase * phase * (3 - 2 * phase)
+            if plan.gaze.pattern == "avert_return":
+                # Skip rather than truncate an event when known audio is short.
+                weight *= gaze_aversion_weight((frame-frame_offset) / fps) if frame_count / fps >= 3.64 else 0.0
             controls[frame]["delta_exp"] = controls[frame].get("delta_exp", 0) + gaze_delta * weight
     if plan.nod is None:
         return controls
@@ -437,13 +475,25 @@ def record_ditto_affect_diagnostic(data_root: Path, payload: dict[str, object]) 
         print(f"Ditto affect diagnostic write failed: {error}", flush=True)
 
 
-def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) -> dict[int, dict[str, float]]:
+def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) -> dict[int, dict[str, float | np.ndarray]]:
     """A conservative, seamless idle trajectory in Ditto's pose space.
 
     The paths return to their start position so browser-side looping does not
     create a pose jump. Mouth movement remains audio-driven and therefore
     stays closed for the silent idle signal.
     """
+    if variant in (3, 4):
+        controls = {}
+        for frame in range(frame_count + frame_offset):
+            t = max(0, frame-frame_offset) / IDLE_FPS
+            nod_phase = (t-.4)/.72
+            pitch = 1.6*np.sin(np.pi*nod_phase)**2 if variant == 3 and 0<nod_phase<1 else 0
+            gaze = pupil_gaze_delta(GazeIntent(mode="pupil",x=.45,y=-.1)) * (gaze_aversion_weight(t,.4) if variant == 4 else 0)
+            edge = float(np.clip(min((frame-frame_offset)/8,(frame_count-1-(frame-frame_offset))/8),0,1))
+            controls[frame] = {"delta_pitch":float(pitch), "delta_yaw":0., "delta_roll":0.,
+                               "delta_exp":gaze, "preserve_speech_lips":True,
+                               "boundary_alpha":edge*edge*(3-2*edge)}
+        return controls
     controls: dict[int, dict[str, float]] = {}
     cycles = (1.0, 2.0, 1.0)[variant % 3]
     phase_offset = (0.0, 0.7, 1.4)[variant % 3]
@@ -455,16 +505,24 @@ def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) 
         yaw = 0.8 * envelope * np.sin(phase + phase_offset)
         pitch = 0.38 * envelope * np.sin(phase * 0.5 + phase_offset) + 0.16 * envelope * np.sin(phase * 2)
         roll = 0.22 * envelope * np.sin(phase * 0.7 + phase_offset)
-        # Variant two includes one deliberately tiny acknowledgement nod.
+        # Listening has brief acknowledgements, not a 16-second sustained bow.
+        gaze_delta = None
         if variant % 3 == 2:
-            nod_phase = progress
-            pitch += 1.15 * np.sin(np.pi * nod_phase) ** 2
+            seconds = visible_frame / IDLE_FPS
+            for start, amplitude in ((2.4, 1.6), (10.2, 1.2)):
+                nod_phase = (seconds-start) / .72
+                if 0 < nod_phase < 1:
+                    pitch += amplitude * np.sin(np.pi * nod_phase) ** 2
+            gaze_delta = pupil_gaze_delta(GazeIntent(mode="pupil", x=.55, y=-.15)) * gaze_aversion_weight(seconds, start=5.0)
         controls[frame] = {
             "boundary_alpha": float((lambda t: t*t*t*(10+t*(-15+6*t)))(min(1.0, visible_frame / 40, (frame_count-1-visible_frame) / 40))),
             "delta_yaw": float(yaw),
             "delta_pitch": float(pitch),
             "delta_roll": float(roll),
         }
+        if gaze_delta is not None:
+            controls[frame]["delta_exp"] = gaze_delta
+            controls[frame]["preserve_speech_lips"] = True
     return controls
 
 
@@ -875,14 +933,15 @@ class DittoLiveRuntime:
         safe_avatar = hashlib.sha256(avatar_id.encode("utf-8")).hexdigest()[:24]
         return self.config.data_root / "idle" / f"{safe_avatar}-r{IDLE_ASSET_VERSION}-v{variant}"
 
-    async def prepare_idle(self, avatar_id: str, source: Path, variants: int = 3) -> list[Path]:
+    async def prepare_idle(self, avatar_id: str, source: Path, variants: int = 5) -> list[Path]:
         """Generate immutable, full-frame idle variants once per avatar."""
         await self.prepare(avatar_id, source)
         async with self.lock:
             outputs: list[Path] = []
             for variant in range(variants):
                 output = self.idle_path(avatar_id, variant)
-                if (output / f"{IDLE_FRAME_COUNT-1:04d}.jpg").is_file():
+                count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
+                if (output / f"{count-1:04d}.jpg").is_file():
                     outputs.append(output)
                     continue
                 output.mkdir(parents=True, exist_ok=True)
@@ -893,7 +952,7 @@ class DittoLiveRuntime:
     def _generate_idle_blocking(self, avatar_id: str, variant: int, output: Path) -> None:
         started = time.monotonic()
         sdk = self._load_sdk()
-        frame_count = IDLE_FRAME_COUNT
+        frame_count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
         sink = IdleJpegFrameSink(output, expected_frames=frame_count, skip_initial_frames=DITTO_PREROLL_FRAMES)
         ctrl_info = build_idle_ctrl_info(variant, frame_count, frame_offset=DITTO_PREROLL_FRAMES)
         blink_open_frames = idle_blink_open_frames(variant)
@@ -1168,6 +1227,15 @@ class RealtimePcmTimeline:
         with self._lock:
             speech_frames = max(1, int(np.ceil(len(self._samples) / 640)))
             return self._lead_frames + speech_frames + self._tail_frames
+
+    def frame_rms(self, frame: int) -> float | None:
+        """Only the current 40ms PCM window; no future accents or stale turn state."""
+        start = (frame-self._lead_frames)*640
+        with self._lock:
+            if start < 0 or start >= len(self._samples) or self._cancelled:
+                return None
+            samples = self._samples[start:start+640].astype(np.float32)/32768
+        return float(np.sqrt(np.mean(samples*samples)))
 
     def cancel(self) -> None:
         with self._lock:
@@ -1578,6 +1646,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             "intensity": motion_plan.intensity,
             "expression_test": motion_plan.expression_test,
             "expression_render_mode": motion_plan.expression_render_mode,
+            "temporal_policy": motion_plan.temporal_policy,
             "audio_streaming": body.audio_streaming,
             "target_frames": target_frames,
             "boundary_policy": "direct_live_handoff_v12",
@@ -1643,6 +1712,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             profile_events.append(("turn_setup", setup_started_at, time.monotonic()))
         setup_nd_started_at = time.monotonic()
         sdk.setup_Nd(target_frames, ctrl_info=ctrl_info)
+        if motion_plan.temporal_policy == "sobia":
+            sdk.motion_stitch.set_speech_timeline(timeline, preroll_frames)
         # Do not pull speech endpoints toward the source portrait. The browser
         # hands native moving lead/tail frames directly to the live idle stream.
         if profile_enabled:
@@ -1935,10 +2006,11 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/assets/idle/{avatar_id}/{variant}/mjpeg")
     async def idle_asset(avatar_id: str, variant: int) -> StreamingResponse:
-        if idle_runtime is None or variant < 0 or variant > 2:
+        if idle_runtime is None or variant < 0 or variant > 4:
             raise HTTPException(status_code=404, detail="idle loop not found")
         directory = idle_runtime.idle_path(avatar_id, variant)
-        paths = [directory / f"{index:04d}.jpg" for index in range(IDLE_FRAME_COUNT)]
+        count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
+        paths = [directory / f"{index:04d}.jpg" for index in range(count)]
         if not all(path.is_file() for path in paths):
             raise HTTPException(status_code=404, detail="idle loop not prepared")
 
@@ -1959,6 +2031,8 @@ def create_app() -> FastAPI:
                     # burst many stale frames after a stalled connection.
                     deadline = max(deadline + 1 / IDLE_FPS, time.monotonic())
                     await asyncio.sleep(max(0, deadline - time.monotonic()))
+                if variant in (3, 4):
+                    return  # An acoustic cue plays once, never loops after a pause.
 
         return StreamingResponse(
             loop_frames(),
@@ -2016,7 +2090,7 @@ def create_app() -> FastAPI:
     async def delete_avatar(avatar_id: str):
         cache.delete(avatar_id)
         if idle_runtime is not None:
-            for variant in range(3):
+            for variant in range(5):
                 directory = idle_runtime.idle_path(avatar_id, variant)
                 if directory.is_dir():
                     shutil.rmtree(directory)

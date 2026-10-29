@@ -3,6 +3,7 @@ import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit
 import { GeometryHandoff, warmGeometryHandoff } from './geometryHandoff'
 import { PerceptionPanel, type PerceptionHandle } from './PerceptionPanel'
 import { IdleCanvas } from './IdleCanvas'
+import { ListeningPolicy, type ListeningCue } from './listeningPolicy'
 import { TurnDiagnostics } from './TurnDiagnostics'
 import './rendered-video.css'
 import './test-studio.css'
@@ -550,7 +551,22 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch (error) { setFeedbackStatus(error instanceof Error ? error.message : '로그 다운로드 실패') }
   }
-  const [idleVariant, setIdleVariant] = useState(() => Math.floor(Math.random() * 3))
+  const [idleVariant, setIdleVariant] = useState(() => Math.floor(Math.random() * 2))
+  const [listeningPreview, setListeningPreview] = useState(false)
+  const [listeningCue, setListeningCue] = useState<{kind:ListeningCue;id:number}|null>(null)
+  const listeningPolicyRef=useRef(new ListeningPolicy())
+  const listeningActiveRef=useRef(false)
+  useEffect(()=>{
+    if(state!=='listening'){listeningActiveRef.current=false;listeningPolicyRef.current.reset();setListeningCue(null)}
+  },[state])
+  const [gazeTest, setGazeTest] = useState<'default' | 'center' | 'left' | 'right' | 'avert_return'>('default')
+  // Keep the selected idle stream stable throughout thinking and speech.
+  // Listening begins at frame zero; its short events have a repeatable clock.
+  useEffect(() => {
+    if (state === 'ready' && listeningPreview) setIdleVariant(2)
+    else if(state === 'listening') setIdleVariant(0)
+    else if (state === 'ready') setIdleVariant(current => current === 2 ? 0 : current)
+  }, [state, listeningPreview])
   const [idleRevision, setIdleRevision] = useState(0)
   const [idleAvailable, setIdleAvailable] = useState(false)
   const [voiceSupported] = useState(() => supportsSpeechRecognition())
@@ -608,7 +624,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   useEffect(() => {
     let cancelled = false
     setIdleAvailable(false)
-    setIdleVariant(Math.floor(Math.random() * 3))
+    setIdleVariant(Math.floor(Math.random() * 2))
     if (!apiOnline) return () => { cancelled = true }
     void api.prepareIdle(avatar.id).then(() => {
       if (!cancelled) setIdleRevision((value) => value + 1)
@@ -914,6 +930,9 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }
 
   const stopListening = ({ submitOnEnd = false }: { submitOnEnd?: boolean } = {}) => {
+    listeningActiveRef.current=false
+    listeningPolicyRef.current.reset()
+    setListeningCue(null)
     perceptionRef.current?.endSpeech()
     submitVoiceOnEndRef.current = submitOnEnd && Boolean(voiceTextRef.current.trim())
     recognitionRef.current?.stop()
@@ -968,7 +987,11 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         ? undefined
         : { emotion: affectMode, intensity: affectIntensity }
       if (apiOnline) void api.telemetry({turn_id: turnId, event: 'render_requested', elapsed_ms: 0, details: {mode: expressionRenderMode, emotion: affectMode, intensity: affectIntensity}})
-      const result = apiOnline ? await api.sendTurn(sessionId, text, affectOverride, turnId, expressionRenderMode, perceptionRef.current?.turnOptions()) : localTurn(text, avatar)
+      const result = apiOnline ? await api.sendTurn(sessionId, text, affectOverride, turnId, expressionRenderMode, perceptionRef.current?.turnOptions(), gazeTest === 'default' ? undefined : {
+        mode: 'pupil', pattern: gazeTest === 'avert_return' ? 'avert_return' : 'hold',
+        x: gazeTest === 'left' ? -.65 : gazeTest === 'right' || gazeTest === 'avert_return' ? .65 : 0,
+        y: gazeTest === 'avert_return' ? -.15 : 0,
+      }) : localTurn(text, avatar)
       if (!mountedRef.current) return
       perceptionRef.current?.showTurn(result)
       const applied = result.renderer.applied_motion
@@ -1009,6 +1032,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     if (state === 'thinking' || !sessionId || recognitionRef.current) return
     perceptionRef.current?.beginSpeech()
     setState('listening')
+    listeningPolicyRef.current.reset()
+    listeningActiveRef.current=true
     setVoiceError(null)
     setDraft('')
     voiceTextRef.current = ''
@@ -1017,6 +1042,10 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     lastVoiceActivityRef.current = performance.now()
     try {
       await beginMedia(mediaRef, setAudioLevel, (rms) => {
+        if(listeningActiveRef.current && recognitionRef.current){
+          const cue=listeningPolicyRef.current.observe(performance.now()/1000,rms)
+          if(cue)setListeningCue({kind:cue,id:Date.now()})
+        }
         if (voiceTurnMode !== 'protected_auto_turn' || !recognitionRef.current) return
         const now = performance.now()
         if (rms >= 0.018) {
@@ -1117,7 +1146,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
-          <IdleCanvas canvasRef={idleImageRef} className={`idle-avatar-video ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} source={idleUrl(avatar.id, idleVariant, idleRevision)} onReady={setIdleAvailable} label={`${avatar.name} 대기 아바타 영상`} />
+          <IdleCanvas canvasRef={idleImageRef} className={`idle-avatar-video ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} source={listeningCue ? `${idleUrl(avatar.id,listeningCue.kind==='nod'?3:4,idleRevision)}&cue=${listeningCue.id}` : idleUrl(avatar.id, idleVariant, idleRevision)} onComplete={listeningCue ? () => setListeningCue(null) : undefined} onReady={setIdleAvailable} label={`${avatar.name} 대기 아바타 영상`} />
           {realtimeActive ? <canvas ref={realtimeCanvasRef} className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} aria-label={`${avatar.name} 실시간 아바타 영상`} /> : renderedVideo && (renderedVideo.includes('/live-media/') ? <img className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} alt={`${avatar.name} 실시간 아바타 영상`} onLoad={() => setStreamReady(true)} onError={() => { setRenderedVideo(undefined); setStreamReady(true) }} /> : <video className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} autoPlay playsInline onEnded={() => { setRenderedVideo(undefined); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedVideo(undefined); setState('ready') }} />)}
           {renderedAudio && <audio ref={renderedAudioRef} src={renderedAudio} preload="auto" onEnded={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} />}
           <div className="ai-watermark"><Sparkles size={13} /> AI AVATAR</div>
@@ -1125,6 +1154,15 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
           <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? (affectMode === 'auto' ? '얼굴 관측 → 표정 · 진단 강도 65% · API 토큰 없음' : '고정 WAV · API 토큰 사용 없음') : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
+          <div className="nonverbal-controls">
+            <label>발화 시선 <select aria-label="발화 시선" value={gazeTest} disabled={state !== 'ready'} onChange={event => setGazeTest(event.target.value as typeof gazeTest)}>
+              <option value="default">기존 자동</option><option value="center">정면 유지</option>
+              <option value="left">왼쪽 시선</option><option value="right">오른쪽 시선</option>
+              <option value="avert_return">잠깐 이탈 후 복귀</option>
+            </select></label>
+            <button type="button" aria-pressed={listeningPreview} disabled={state !== 'ready'} onClick={() => setListeningPreview(value => !value)}>{listeningPreview ? '경청 미리보기 종료' : '경청 미리보기'}</button>
+            <small>{listeningPreview ? '16초 반복 · 2.4초/10.2초 끄덕임 · 5초 시선 이탈, 6.4초 복귀' : '시선 선택은 다음 발화부터 적용 · 마이크 청취 시 경청 동작'}</small>
+          </div>
           <details><summary>고급 합성 설정</summary>
           <div className="affect-buttons" role="group" aria-label="표정 합성 비교 모드">
             {([['speech_safe','발음 보호 (기본)'],['off','표정 없음'],['native','감정 조건만'],['legacy','기존 증폭 (비교용)']] as const).map(([mode,label]) => <button type="button" key={mode} className={expressionRenderMode === mode ? 'selected' : ''} onClick={() => setExpressionRenderMode(mode)}>{label}</button>)}

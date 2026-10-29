@@ -57,6 +57,7 @@ class TurnIn(BaseModel):
     text: str = Field(min_length=1, max_length=4_000)
     client_turn_id: str | None = Field(default=None, min_length=1, max_length=128)
     motion_plan: "MotionPlan | None" = None
+    gaze_override: "GazeIntent | None" = None
     # A manual display-affect selection for visual evaluation. When present,
     # the conversation provider must not spend a Realtime tool call.
     affect_override: "AffectIntent | None" = None
@@ -103,6 +104,7 @@ class GazeIntent(BaseModel):
     """
 
     mode: Literal["head_cue", "pupil"] = "head_cue"
+    pattern: Literal["hold", "avert_return"] = "hold"
     x: float = Field(default=0, ge=-1, le=1)
     y: float = Field(default=0, ge=-1, le=1)
 
@@ -139,6 +141,7 @@ class MotionPlan(BaseModel):
     expression_test: bool = False
     expression_render_mode: ExpressionRenderMode = "speech_safe"
     head: HeadPose = Field(default_factory=HeadPose)
+    temporal_policy: Literal["steady", "sobia"] = "steady"
     gaze: GazeIntent = Field(default_factory=GazeIntent)
     nod: NodIntent | None = None
 

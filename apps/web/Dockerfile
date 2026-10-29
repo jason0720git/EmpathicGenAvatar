@@ -4,6 +4,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json ./apps/web/package.json
 RUN corepack enable && pnpm install --filter @empathic-avatar/web --frozen-lockfile
 COPY apps/web ./apps/web
+COPY apps/api/app/emotion_profiles.json ./apps/api/app/emotion_profiles.json
 RUN pnpm --dir apps/web build
 
 FROM nginx:1.27-alpine

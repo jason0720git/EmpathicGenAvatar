@@ -17,15 +17,22 @@ import cv2
 import numpy as np
 import websockets
 
-from .main import DITTO_EMOTION_INDEX
+from .main import DITTO_EMOTION_INDEX, DITTO_TURN_LEAD_FRAMES
 
 
 async def main():
     ab = '--speech-ab' in sys.argv
+    gaze_ab = '--gaze-ab' in sys.argv
     output = Path('/data/benchmarks/speech-ab-v5' if ab else '/data/benchmarks/native8-v5')
+    if gaze_ab:
+        output = Path('/data/benchmarks/gaze-speech-v1')
     output.mkdir(parents=True, exist_ok=True)
-    subprocess.run(['espeak-ng', '-w', str(output / 'input.wav'),
-                    'Hello. This is the same sentence for every expression.'], check=True)
+    if gaze_ab:
+        # Same Korean speech fixture as the user-facing WAV test page.
+        urllib.request.urlretrieve('http://api:8000/api/test-audio', output / 'input.wav')
+    else:
+        subprocess.run(['espeak-ng', '-w', str(output / 'input.wav'),
+                        'Hello. This is the same sentence for every expression.'], check=True)
     subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-i', str(output / 'input.wav'),
                     '-ar', '16000', '-ac', '1', str(output / 'speech.wav')], check=True)
     with wave.open(str(output / 'speech.wav'), 'rb') as source:
@@ -36,17 +43,22 @@ async def main():
     with wave.open(str(output / 'speech.wav'), 'wb') as target:
         target.setparams(params)
         target.writeframes(pcm + bytes(32000))
-    silence_moment = int(speech_ms + 400)
+    silence_moment = int(speech_ms + 400 + DITTO_TURN_LEAD_FRAMES * 40)
     rows = []
     tiles = []
     silence_tiles = []
     variants = [(f'{emotion}-{mode}',emotion,mode) for emotion in ('happy','angry') for mode in ('off','native','legacy','speech_safe')] if ab else [(name,name,'speech_safe') for name in DITTO_EMOTION_INDEX]
+    if gaze_ab:
+        variants = [(name, 'happy', 'speech_safe') for name in ('baseline', 'left', 'right', 'avert-return')]
     for label, emotion, mode in variants:
+        gaze = ({'mode': 'pupil', 'pattern': 'avert_return' if label == 'avert-return' else 'hold',
+                 'x': -.65 if label == 'left' else .65 if label in ('right', 'avert-return') else 0,
+                 'y': -.15 if label == 'avert-return' else 0} if gaze_ab else {'x': 0, 'y': 0})
         turn = 'native8-' + emotion + '-' + uuid.uuid4().hex[:8]
         request = urllib.request.Request('http://127.0.0.1:8010/v1/turns/render',
             data=json.dumps({'avatar_id': 'demo-seoyeon', 'turn_id': turn,
                 'audio_path': str(output / 'speech.wav'),
-                'motion_plan': {'expression': emotion, 'intensity': 1,
+                'motion_plan': {'expression': emotion, 'intensity': .5 if gaze_ab else 1, 'gaze': gaze,
                                 'expression_render_mode': mode,
                                 'expression_test': True}}).encode(),
             headers={'Content-Type': 'application/json'})
@@ -104,11 +116,11 @@ async def main():
         tile = cv2.copyMakeBorder(tile, 35, 0, 0, 0, cv2.BORDER_CONSTANT)
         cv2.putText(tile, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, .5, (255,255,255), 1)
         silence_tiles.append(tile)
-        row = {'emotion': emotion, 'mode': mode, 'turn_id': turn, 'audio_packets': counts[1], 'video_frames': counts[2]}
+        row = {'emotion': emotion, 'mode': mode, 'turn_id': turn, 'audio_packets': counts[1], 'video_frames': counts[2], 'gaze': gaze}
         rows.append(row)
         print(json.dumps(row), flush=True)
-    cv2.imwrite(str(output / 'comparison.jpg'), np.vstack([np.hstack(tiles[:4]), np.hstack(tiles[4:])]))
-    cv2.imwrite(str(output / 'silence-comparison.jpg'), np.vstack([np.hstack(silence_tiles[:4]), np.hstack(silence_tiles[4:])]))
+    cv2.imwrite(str(output / 'comparison.jpg'), np.vstack([np.hstack(tiles[i:i+4]) for i in range(0, len(tiles), 4)]))
+    cv2.imwrite(str(output / 'silence-comparison.jpg'), np.vstack([np.hstack(silence_tiles[i:i+4]) for i in range(0, len(silence_tiles), 4)]))
     (output / 'results.json').write_text(json.dumps(rows, indent=2))
 
 

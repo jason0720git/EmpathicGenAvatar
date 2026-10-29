@@ -82,7 +82,7 @@ class RemoteRenderer(AvatarRenderer):
             "source_path": str(source_path),
             "avatar_version": 1,
             "quality": avatar.quality.model_dump() if avatar.quality else None,
-            "variants": 3,
+            "variants": 5,
         }
         async with httpx.AsyncClient(timeout=900) as client:
             response = await client.post(f"{self.base_url}/v1/avatars/idle", json=payload, headers=self.headers)

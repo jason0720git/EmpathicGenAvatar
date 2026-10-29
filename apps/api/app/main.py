@@ -319,7 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def idle_avatar_mjpeg(avatar_id: str, variant: int) -> StreamingResponse:
         _avatar_or_404(store, avatar_id)
         selected = idle_renderer()
-        if selected is None or variant < 0 or variant > 2:
+        if selected is None or variant < 0 or variant > 4:
             raise HTTPException(status_code=404, detail="idle loop not found")
 
         async def proxy_stream():
@@ -480,6 +480,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if session.mode == 'wav_test' and body.affect_override is None:
             decision = behavior_planner.from_affect(wav_affect, source='wav_face_diagnostic', expression_test=True)
         decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"expression_render_mode": body.expression_render_mode}))
+        if body.gaze_override is not None:
+            decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"gaze": body.gaze_override}))
         debug_payload = behavior_debug_payload(
             transport="rest",
             session_id=session_id,
@@ -597,6 +599,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "motion_plan": payload.get("motion_plan"),
                         "motion_override": payload.get("motion_override", False),
                         "affect_override": payload.get("affect_override"),
+                        "gaze_override": payload.get("gaze_override"),
                         "expression_render_mode": payload.get("expression_render_mode", "speech_safe"),
                         "use_observation": payload.get("use_observation",False),
                         "observation_window_ms": payload.get("observation_window_ms",3000),
@@ -626,6 +629,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     motion_override=turn_body.motion_override,
                 )
                 decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"expression_render_mode": turn_body.expression_render_mode}))
+                if turn_body.gaze_override is not None:
+                    decision = replace(decision, motion_plan=decision.motion_plan.model_copy(update={"gaze": turn_body.gaze_override}))
                 debug_payload = behavior_debug_payload(
                     transport="websocket",
                     session_id=session_id,

@@ -149,15 +149,49 @@ it('defaults the simplified homepage to WAV + TRT10 and skips caption/API conver
   expect([...host.querySelectorAll('button')].some(button=>button.textContent==='Auto · 얼굴 표정 테스트')).toBe(true)
   vi.mocked(api.turnCaption).mockClear()
   await act(async()=>host.querySelector<HTMLButtonElement>('.wav-test-panel .primary-button')!.click())
-  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',{emotion:'neutral',intensity:1},expect.any(String),'speech_safe',{use_observation:false,observation_window_ms:3000,observation_speaking:false,observation_end_age_ms:0})
+  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',{emotion:'neutral',intensity:1},expect.any(String),'speech_safe',{use_observation:false,observation_window_ms:3000,observation_speaking:false,observation_end_age_ms:0},undefined)
   expect(api.turnCaption).not.toHaveBeenCalled()
   await act(async()=>{ socket.onopen?.(); packet(3,0) })
   clock=2
   await act(async()=>vi.advanceTimersByTimeAsync(250))
   await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent==='Auto · 얼굴 표정 테스트')!.click())
   await act(async()=>host.querySelector<HTMLButtonElement>('.wav-test-panel .primary-button')!.click())
-  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',undefined,expect.any(String),'speech_safe',expect.any(Object))
+  expect(api.sendTurn).toHaveBeenLastCalledWith('s','고정 WAV 표정 테스트',undefined,expect.any(String),'speech_safe',expect.any(Object),undefined)
   await act(async()=>[...host.querySelectorAll<HTMLButtonElement>('.test-modes button')].find(button=>button.textContent==='Realtime 대화')!.click())
   expect(api.createSession).toHaveBeenLastCalledWith('demo-seoyeon','ditto_realtime_trt10',expect.any(String),'realtime')
   expect(host.querySelector('.composer')).not.toBeNull()
+})
+
+
+it('selects listening playback and sends gaze separately from affect', async () => {
+  const preview = [...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent==='경청 미리보기')!
+  await act(async()=>preview.click())
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).toContain('/idle/2/')
+  const select=host.querySelector<HTMLSelectElement>('[aria-label="발화 시선"]')!
+  await act(async()=>{ select.value='avert_return';select.dispatchEvent(new Event('change',{bubbles:true})) })
+  await send()
+  expect(api.sendTurn).toHaveBeenLastCalledWith('s','테스트',undefined,expect.any(String),'speech_safe',expect.any(Object),
+    {mode:'pupil',pattern:'avert_return',x:.65,y:-.15})
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).toContain('/idle/2/')
+})
+
+
+it('uses microphone speech cues while listening and clears them when capture stops', async()=>{
+  class Recognition {lang='';continuous=true;interimResults=true;onend?:()=>void;start(){} stop(){this.onend?.()} }
+  vi.stubGlobal('SpeechRecognition',Recognition)
+  const stopTrack=vi.fn()
+  vi.stubGlobal('navigator',{mediaDevices:{getUserMedia:vi.fn().mockResolvedValue({getTracks:()=>[{stop:stopTrack}]})}})
+  class MicAudio extends FakeAudio {
+    createMediaStreamSource(){return {connect:vi.fn()}}
+    createAnalyser(){return {fftSize:256,frequencyBinCount:128,getByteTimeDomainData:(values:Uint8Array)=>values.fill(136)}}
+  }
+  vi.stubGlobal('AudioContext',MicAudio)
+  vi.stubGlobal('fetch',vi.fn().mockImplementation(()=>Promise.resolve({ok:true,body:new ReadableStream()})))
+  await act(async()=>root.render(<LiveRoom key="microphone" avatar={{id:'a',name:'Test',persona:'test',voice:'test',status:'ready',created_at:'',engine:'remote'}} method="ditto_realtime_trt10" sessionInstruction="test" apiOnline onExit={()=>{}}/>))
+  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 시작"]')!.click())
+  await act(async()=>vi.advanceTimersByTimeAsync(1900))
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).toContain('/idle/3/')
+  await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 종료 및 전송"]')!.click())
+  expect(stopTrack).toHaveBeenCalled()
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).not.toContain('/idle/3/')
 })

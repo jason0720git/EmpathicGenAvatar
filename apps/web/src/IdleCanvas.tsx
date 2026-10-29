@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 
 // Explicitly decode the same JPEGs as speech. Native <img> MJPEG presentation
 // has no exposed frame clock; its canvas snapshot need not be the displayed
@@ -31,15 +31,19 @@ export class MjpegParser {
   }
 }
 
-export function IdleCanvas({ source, canvasRef, className, label, onReady, parked=false }: {
+export function IdleCanvas({ source, canvasRef, className, label, onReady, parked=false, onComplete }: {
   source: string; canvasRef: RefObject<HTMLCanvasElement | null>; className: string
   label: string; onReady: (ready: boolean) => void; parked?: boolean
+  onComplete?: () => void
 }) {
+  const completeRef=useRef(onComplete)
+  completeRef.current=onComplete
   useEffect(() => {
     const controller = new AbortController()
     let pending: ImageBitmap | null = null
     let paintId = 0
     let ready = false
+    let ended = false
     // Retain the painted image while reconnecting. During speech fetch only
     // frame zero (the shared source-pose anchor), not an arbitrary idle phase.
     if (!canvasRef.current?.dataset.painted) onReady(false)
@@ -58,6 +62,7 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
         if (!ready) { ready = true; onReady(true) }
       }
       bitmap.close()
+      if(ended) completeRef.current?.()
     }
     const run = async () => {
       const response = await fetch(source, { signal: controller.signal })
@@ -67,7 +72,10 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
       try {
         while (!controller.signal.aborted) {
           const { value, done } = await reader.read()
-          if (done) throw new Error('Idle stream ended')
+          if (done) {
+            if(completeRef.current){ended=true;if(!pending)completeRef.current();break}
+            throw new Error('Idle stream ended')
+          }
           const frames = parser.push(value)
           if (!frames.length) continue
           // Decode serially and retain only the newest frame after a network
@@ -85,7 +93,10 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
     void run().catch(() => {
       // Retain a painted frame on transient failure instead of flashing the
       // source portrait. The next preparation revision reconnects the stream.
-      if (!controller.signal.aborted && !ready) onReady(false)
+      if (!controller.signal.aborted) {
+        if(!ready) onReady(false)
+        completeRef.current?.()
+      }
     })
     return () => { controller.abort(); cancelAnimationFrame(paintId); pending?.close() }
   }, [source, canvasRef, onReady, parked])

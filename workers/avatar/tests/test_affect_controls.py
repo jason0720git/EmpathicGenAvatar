@@ -70,6 +70,63 @@ def test_short_turn_does_not_compress_or_reschedule_nod():
     assert build_ditto_ctrl_info(plan, 0) == {}
 
 
+def test_aversion_returns_and_does_not_repeat_or_truncate():
+    from app.main import GazeIntent
+    plan = MotionPlan(intensity=0, gaze=GazeIntent(mode='pupil', pattern='avert_return', x=.6))
+    controls = build_ditto_ctrl_info(plan, 200, frame_offset=13, hold_expression_end=True)
+    for frame in (13, 13+49, 13+85, 13+199):
+        assert not np.any(controls[frame]['delta_exp'])
+    assert np.any(controls[13+62]['delta_exp'])
+    assert all(not np.any(c.get('delta_exp', 0)) for c in build_ditto_ctrl_info(plan, 75).values())
+
+
+def test_listening_loop_has_separate_brief_nod_and_gaze_events():
+    from app.main import build_idle_ctrl_info
+    controls = build_idle_ctrl_info(2, 400)
+    assert all(not np.any(controls[i]['delta_exp']) for i in (0, 100, 161, 399))
+    assert np.any(controls[140]['delta_exp'])
+    # Both acknowledgements settle well before the loop's boundary.
+    assert controls[69]['delta_pitch'] > 1
+    assert controls[264]['delta_pitch'] > .8
+    assert abs(controls[90]['delta_pitch']) < .6
+    assert abs(controls[300]['delta_pitch']) < .6
+
+
+def test_acoustic_clips_are_anchored_and_channels_are_separate():
+    from app.main import build_idle_ctrl_info
+    for variant,count in ((3,60),(4,75)):
+        controls=build_idle_ctrl_info(variant,count,13)
+        assert controls[13]['boundary_alpha']==controls[count+12]['boundary_alpha']==0
+        assert controls[13]['delta_pitch']==controls[count+12]['delta_pitch']==0
+        assert not np.any(controls[13]['delta_exp']) and not np.any(controls[count+12]['delta_exp'])
+        if variant==3:
+            assert max(c['delta_pitch'] for c in controls.values()) <= 1.6
+            assert all(not np.any(c['delta_exp']) for c in controls.values())
+        else:
+            assert all(c['delta_pitch']==0 for c in controls.values())
+
+
+def test_sobia_envelope_uses_current_pcm_and_keeps_pupil_intent():
+    from app.main import BlinkAwareMotionStitch, RealtimePcmTimeline
+    class Stitch:
+        idx=0
+        def __call__(self, source, driving, **kwargs):
+            self.idx+=1
+            return kwargs['delta_exp']
+    timeline=RealtimePcmTimeline(lead_frames=1,tail_frames=1)
+    timeline.append(np.full(640*4,8000,np.int16));timeline.finish()
+    assert timeline.frame_rms(0) is None and timeline.frame_rms(5) is None
+    assert np.isclose(timeline.frame_rms(1),8000/32768)
+    adapter=BlinkAwareMotionStitch(Stitch());adapter.set_speech_timeline(timeline,0)
+    delta=np.ones((1,63),np.float32)*.001
+    first=adapter(None,None,delta_exp=delta).reshape(21,3)
+    assert first[1,0]==0 and first[11,0]==delta[0,33]
+    active=adapter(None,None,delta_exp=delta).reshape(21,3)
+    assert 0<active[1,0]<.001 and active[11,0]==delta[0,33]
+    assert np.all(delta==.001)
+    timeline.cancel();assert timeline.frame_rms(1) is None
+
+
 def test_affect_intensity_blends_ditto_emotion_from_neutral() -> None:
     neutral = build_ditto_emotion_condition(MotionPlan(expression="happy", intensity=0), 4)
     joy = build_ditto_emotion_condition(MotionPlan(expression="happy", intensity=1, expression_render_mode="native"), 4)
@@ -412,7 +469,7 @@ def test_native_motion_defaults_and_original_idle_are_restored():
     assert 'use_d_keys=' not in inspect.getsource(DittoLiveRuntime._generate_idle_blocking)
     assert 'use_d_keys=' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
     assert 'set_boundary_timeline(' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
-    assert IDLE_ASSET_VERSION == 11  # Rest-mouth calibration invalidates older loops.
+    assert IDLE_ASSET_VERSION == 13  # Rest-mouth calibration invalidates older loops.
     assert DITTO_TURN_LEAD_FRAMES == DITTO_TURN_TAIL_FRAMES == 25
     for variant in range(3):
         controls=build_idle_ctrl_info(variant,400)

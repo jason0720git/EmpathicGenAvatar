@@ -11,7 +11,9 @@ def test_affect_contract_maps_concern_intensity_to_bounded_pose() -> None:
     assert decision.motion_plan.expression == "sad"
     assert decision.motion_plan.intensity == 0.5
     assert decision.motion_plan.head.pitch_deg == 1.1
-    assert decision.motion_plan.gaze.y == -0.3
+    assert decision.motion_plan.gaze.y == -0.075
+    assert decision.motion_plan.gaze.mode == "pupil"
+    assert decision.motion_plan.temporal_policy == "sobia"
 
 
 def test_affect_contract_distinguishes_the_six_supported_display_states() -> None:

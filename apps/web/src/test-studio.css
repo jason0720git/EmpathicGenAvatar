@@ -32,3 +32,8 @@
 .diagnostic-events pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
 @media (max-width: 1100px) { .test-studio .live-layout { grid-template-columns: minmax(0,1fr) minmax(0,1fr); } .test-studio .live-stage { grid-column: 1 / -1; } }
 @media (max-width: 650px) { .test-studio .live-layout { grid-template-columns: 1fr; } .diagnostics-column { position: static; } .test-studio { padding: 16px; } .test-toolbar > span { margin-left: 0; } }
+.nonverbal-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 0; }
+.nonverbal-controls label { display: flex; align-items: center; gap: 8px; }
+.nonverbal-controls select, .nonverbal-controls button { padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: white; color: #334155; }
+.nonverbal-controls button[aria-pressed="true"] { background: #d1fae5; }
+.nonverbal-controls small { flex-basis: 100%; color: #64748b; }
