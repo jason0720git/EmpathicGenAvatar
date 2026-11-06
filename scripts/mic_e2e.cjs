@@ -57,6 +57,8 @@ async function run(name){
   if(!report.transcript||report.errors.length)throw new Error('Missing transcript or browser error');
   if(!report.telemetry.some(e=>e.event==='playback_ended'))throw new Error('No completed playback');
   if(report.telemetry.some(e=>['jpeg_decode_failed','video_pts_gap','socket_error'].includes(e.event)))throw new Error('Media error');
+  const exits=report.telemetry.filter(e=>e.event==='visual_transition'&&e.details?.direction==='speech_to_idle'&&e.details?.phase==='completed');
+  if(!report.telemetry.some(e=>e.event==='stream_timing')||!exits.length||exits.some(e=>!e.details.live_tail_completed||e.details.fallback))throw new Error('Tail timing arrived too late for a complete moving handoff');
   if(name==='short'&&!report.telemetry.some(e=>e.event==='visual_transition'&&e.details?.tail_start_ms>=1000&&e.details.tail_start_ms<=4000))throw new Error('Reply did not meet the <=3 second speech scenario');
   console.log(JSON.stringify({name,passed:true,transcript:report.transcript,frames:frames.length,events:report.telemetry.length}));
  }catch(e){report.passed=false;report.failure=e.message;console.error(name,e.message);process.exitCode=1}

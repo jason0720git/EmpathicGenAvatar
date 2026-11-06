@@ -1276,6 +1276,8 @@ class RealtimePcmTimeline:
         if not len(samples):
             return
         with self._lock:
+            if self._complete:
+                raise ValueError('cannot append PCM after timeline completion')
             self._samples = np.concatenate([self._samples, samples.astype(np.int16, copy=False)])
 
     def finish(self) -> None:
@@ -1287,6 +1289,16 @@ class RealtimePcmTimeline:
         with self._lock:
             speech_frames = max(1, int(np.ceil(len(self._samples) / 640)))
             return self._lead_frames + speech_frames + self._tail_frames
+
+    def final_timing(self) -> dict | None:
+        """Exact immutable padded video endpoint, never an unfinished estimate."""
+        with self._lock:
+            if not self._complete or self._cancelled:
+                return None
+            speech_frames = max(1,int(np.ceil(len(self._samples)/640)))
+            tail_start = (self._lead_frames+speech_frames)*40
+            return {'type':'stream.timing','tail_start_ms':tail_start,
+                    'video_end_ms':tail_start+self._tail_frames*40}
 
     def frame_rms(self, frame: int) -> float | None:
         """Only the current 40ms PCM window; no future accents or stale turn state."""
@@ -1547,6 +1559,14 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
 
         pcm_input: queue.Queue[np.ndarray | None] = queue.Queue()
         render_task: asyncio.Task[None] | None = None
+        async def finish_audio():
+            timeline.finish()
+            timing = timeline.final_timing()
+            if timing is not None and turn.control_events is not None:
+                # Pacing limits generation lead to < the full silent tail.
+                # Announce PCM-owned bounds now; binary END still means every
+                # frame has been emitted, and must not start the tail blend.
+                await turn.control_events.put(timing)
         try:
             # An external voice file (Marin/Reatime bridge) is authoritative:
             # Ditto and browser packets must consume exactly the same samples.
@@ -1577,7 +1597,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
                             offset = readable
                             metrics.mark("external_audio_first_pcm")
                     if done.is_file():
-                        timeline.finish()
+                        await finish_audio()
                         pcm_input.put(np.zeros((DITTO_TURN_TAIL_FRAMES * 640,), dtype=np.int16))
                         pcm_input.put(None)
                         break
@@ -1619,7 +1639,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
                 pcm = np.concatenate(pcm_parts) if len(pcm_parts) > 1 else pcm_parts[0]
             if not body.audio_streaming:
                 timeline.append(pcm)
-                timeline.finish()
+                await finish_audio()
                 render_task = asyncio.create_task(
                     asyncio.to_thread(self._run_realtime_sdk, asyncio.get_running_loop(), body, turn, timeline, metrics, pcm_input),
                     name=f"ditto-realtime-sdk-{body.turn_id}",

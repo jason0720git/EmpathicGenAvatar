@@ -151,6 +151,8 @@ async function main() {
     assert.equal(controlErrors.length, 0, JSON.stringify(controlErrors));
     assert(report.telemetry.some(e => e.event === 'playback_ended'), 'Playback did not finish');
     assert(!report.telemetry.some(e => ['jpeg_decode_failed', 'video_pts_gap', 'socket_error'].includes(e.event)), 'Media pipeline error');
+    assert(report.telemetry.some(e => e.event === 'stream_timing'), 'Missing early PCM timing');
+    assert(report.telemetry.some(e => e.event === 'visual_transition' && e.details?.direction === 'speech_to_idle' && e.details?.phase === 'completed' && e.details.live_tail_completed && !e.details.fallback), 'Tail did not finish while both images were moving');
     report.passed = true;
   } catch (error) {
     report.failure = error.message; process.exitCode = 1;

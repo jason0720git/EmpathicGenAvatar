@@ -408,7 +408,7 @@ def test_cancel_waits_for_native_thread_before_releasing_sdk():
         runtime._run_realtime_sdk = native
         connected = asyncio.Event()
         connected.set()
-        turn = SimpleNamespace(websocket_connected=connected, packets=asyncio.Queue())
+        turn = SimpleNamespace(websocket_connected=connected, packets=asyncio.Queue(), control_events=None)
         body = RenderIn(avatar_id='test', turn_id='test', audio_path=str(root/'speech.wav'))
         task = asyncio.create_task(runtime._run_realtime(body, turn, RealtimePcmTimeline(), RealtimeTurnMetrics(), root))
         for _ in range(100):

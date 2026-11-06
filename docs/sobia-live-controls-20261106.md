@@ -82,10 +82,83 @@ reset이 자동 동작에 수렴하면 override 소유권을 해제하여 이후
 
 초기화는 턴당 한 번이다. 이후 PTS는 정수·단조 증가여야 하며 생성 시각을 비현실적으로 앞서는 값은 거부한다. 초기 생성 허용 범위는 1200ms이고, 재생이 시작되면 마지막 표시 PTS보다 800ms 앞선 범위까지로 제한한다. 네이티브 stitching thread가 이 범위에서 기다렸다가 새 프레임 생성 직전에 최신 제어 target을 읽는다. 오디오 샘플을 늘이거나 이미 만들어진 오래된 프레임을 빠르게 건너뛰어 맞추는 방식은 아니다.
 
-close/cancel은 대기를 즉시 해제한다. 첫 비음수 stitch 프레임부터 5초 동안 표시 피드백이 없으면 해당 턴의 live control을 비활성화하고 `control.error`를 내보낸 뒤 생성 대기를 해제하여 정리할 수 있게 한다. GPU 초기 로딩 시간 자체가 5초 제한을 소모하지 않도록 했다. 초기화 메시지를 보내지 않는 offline/benchmark 소비자는 기존 생성 처리량을 유지한다. 이 제한이 정한 800ms는 end-to-end 지연 보장이 아니며, 디코딩·네트워크·브라우저 표시 및 평활화 시간은 별도다. 보완 후 실제 지연은 아래 최종 검증에서 다시 확인해야 한다.
+close/cancel은 대기를 즉시 해제한다. 첫 비음수 stitch 프레임부터 5초 동안 표시 피드백이 없으면 해당 턴의 live control을 비활성화하고 `control.error`를 내보낸 뒤 생성 대기를 해제하여 정리할 수 있게 한다. GPU 초기 로딩 시간 자체가 5초 제한을 소모하지 않도록 했다. 초기화 메시지를 보내지 않는 offline/benchmark 소비자는 기존 생성 처리량을 유지한다. 이 제한이 정한 800ms는 end-to-end 지연 보장이 아니며, 디코딩·네트워크·브라우저 표시 및 평활화 시간은 별도다. 보완 후 실제 지연은 아래 최종 검증에 기록했다.
+
+### 실제 음성 종료와 미디어 전송 종료 구분
+
+생성 제한을 적용한 뒤에는 바이너리 END 패킷이 실제 tail 프레임 전송 완료까지 기다리므로, 이를 받아서야 tail 시작을 계산하면 얼굴의 정상 복귀를 늦게 시작한다. 최초 네 WAV 시나리오는 기존 STT/재생 완료 검사에는 통과했지만 모두 `speech_to_idle` fallback을 사용했다. 이 결과는 `artifacts/mic-policy-20261106/`에 보존했고 자연스러운 정상 tail 전환의 성공으로 처리하지 않았다.
+
+worker는 실제 PCM 입력이 끝나 길이가 확정되면, tail 프레임의 생성·전송이 끝나기 전에 다음 JSON 이벤트를 한 번 보낸다.
+
+```json
+{"type":"stream.timing","tail_start_ms":5000,"video_end_ms":6000}
+```
+
+예시의 숫자는 설명용이다. 실제 값은 해당 PCM 길이에서 계산하며, tail은 1000ms다. 브라우저는 첫 유효 이벤트를 불변 종료 시각으로 받아 이미 움직이는 영상의 silent tail 안에서 idle 전환을 시작한다. 바이너리 END는 여전히 실제 모든 패킷의 전송 완료를 뜻하며 앞당기지 않는다. 마지막 그림을 늦게 숨기는 fallback만으로 정상 복귀가 됐다고 검사하지 않도록, WAV 자동화에 `fallback=false`와 `live_tail_completed=true` 검사를 추가했다.
 
 ## 검증 기록
 
-최종 실행 결과는 주 작업자의 검증 완료 후 이 절에 기록한다. 기록할 항목은 worker 단위 테스트, web 테스트/빌드, 실제 GPU 명령 반영 PTS, 표시 지연, 얼굴·머리·시선 영상 차이, 짧은 응답·중단·reset·연속 입력, 립싱크/blink 회귀다. 제어 파라미터가 바뀐 사실과 영상에서 의도한 움직임이 보이는 사실을 구분하고, 영상 관찰을 인간 수준 자연스러움의 객관적 증명으로 확대하지 않는다.
+현재 코드 검증은 web 82개, worker 60개, API 109개 통과·1개 skip이며 build가 성공했다.
+
+실제 GPU 생성·브라우저 표시를 통과한 제어 시험의 기록은 다음과 같다. 시간은 명령을 보낸 뒤 처음 영향을 받는 생성 프레임을 화면에서 관측하기까지이며, target이 완전히 정착하는 시간은 아니다.
+
+| 경로 | 명령 | 최초 영향 프레임 표시 지연(ms) |
+| --- | --- | --- |
+| 독립 채널 | gaze-left | 697.2 |
+| 독립 채널 | gaze-right | 769.7 |
+| 독립 채널 | head | 794.1 |
+| 독립 채널 | happy | 796.8 |
+| 독립 채널 | sad | 808.3 |
+| 독립 채널 | reset | 801.4 |
+| 실제 UI | expression | 797.8 |
+| 실제 UI | gaze-left | 709.9 |
+| 실제 UI | head | 801.5 |
+| 실제 UI | reset | 812.4 |
+
+- `artifacts/live-control-paced/`: 독립 채널 6개, audio 522/video 572/end 1 패킷, 브라우저 예외 0. 명령→worker 적용 통지 13.1~121.1ms. 분석한 얼굴 362프레임에서 검출 누락 0.
+- `artifacts/live-control-ui/`: UI 4개, audio 344/video 394/end 1 패킷, 브라우저 예외 0. 명령→worker 적용 통지 34.5~131.5ms. 분석한 얼굴 274프레임에서 검출 누락 0.
+- `artifacts/live-control-ui-final/`: `stream.timing` 변경 후 실제 UI 4개를 다시 검증했다. expression/gaze/head/reset의 첫 화면 반영은 각각 816.9/720.9/795.8/763.6ms, audio 372/video 422/end 1 패킷이며 오류 없이 정상 tail 복귀까지 통과했다.
+- 독립 시선 시험의 iris ratio 중앙값은 left 약 (.484,.513), right (.530,.545), reset (.504,.516)으로 변했다. head와 표정의 이미지/기하학 대리지표 변화도 기록한다. 이 값은 해부학적 각도나 사람의 자연스러움 평점이 아니며 native motion·blink·발음 차이를 포함한다.
+- happy→sad의 눈썹 간격 중앙값은 (.727,.685)→(.738,.697)로 작게 변했다. 표정 차이가 강하게 인식된다는 증거로 삼지 않으며, 특히 입 모양은 발음과 섞인다. 인물별 감정 식별력은 추가 보정·평가가 필요하다.
+- 표정 residual이 발화 중 바뀌는 것과 눈·머리 제어가 실제 영상에 나타나는 것을 검증했다. native Audio2Motion 조건까지 새 감정으로 재생성하거나 모든 인물에서 같은 표정 크기를 보장하는 결과가 아니다.
+
+`stream.timing` 보완 후 최종 WAV 재검증은 `artifacts/mic-policy-final-20261106/`에 따로 기록했다. 전체 프로세스 exit 0이며 네 시나리오 모두 완료된 응답에서 `live_tail_completed=true`, `fallback=false`를 확인했다. 브라우저 예외·미디어 오류는 없었다.
+
+| 가상 마이크 시나리오 | 표시 프레임 수 | 결과 |
+| --- | ---: | --- |
+| normal | 358 | 실제 STT → 경청 → 응답 → 정상 tail 복귀 통과 |
+| short | 135 | 짧은 응답 완료와 정상 tail 복귀 통과 |
+| interrupt | 486 | 첫 응답 중단 → 재경청 → 후속 응답 완료와 정상 tail 복귀 통과 |
+| auto | 318 | 무음 감지 자동 전송 → 응답 → 정상 tail 복귀 통과 |
+
+최종 화면 전환 지점의 얼굴 영역 평균 픽셀 차이는 normal 1.96, short 1.40, interrupt의 중단 1.46·후속 종료 1.45, auto 1.81/255였다. 각 영상 전체의 95백분위 변화 4.21~7.02/255보다 작았다. 짧은 답변과 중단의 연속 프레임도 검토했으며 큰 위치 도약은 관측되지 않았다. 이는 제한된 샘플의 연속성 보조 지표이며 사람 같은 자연스러움이나 립싱크 정확도의 점수가 아니다.
+
+제어 파라미터가 바뀐 사실과 영상에서 의도한 움직임이 보이는 사실을 구분하며, 영상 관찰을 인간 수준 자연스러움의 객관적 증명으로 확대하지 않는다. 실제 물리 마이크의 반향·소음, 다른 얼굴 이미지, 장시간 대화의 피로감·반복감 평가는 이 자동화 결과만으로 통과했다고 할 수 없다.
 
 생성 WAV/영상/프레임/진단 로그는 `artifacts/` 또는 `tmp/`에 보관하고 커밋하지 않는다.
+
+## 재실행
+
+프로젝트 루트에서 API/web/TRT10 서비스를 실행하고 설정된 Realtime 제공자에 접속할 수 있어야 한다. 아래 브라우저 검증은 실제 모델 호출을 하므로 사용량이 발생한다. `create_mic_fixtures.ps1`는 개인 녹음 대신 Windows Heami 합성 음성을 만들며, 네이티브 Chrome 음성 인식에는 네트워크 연결이 필요하다.
+
+현재 호스트의 번들 Node/Playwright 경로를 사용하는 예시다. 번들 경로가 달라졌다면 해당 환경에서 제공하는 Node 및 Playwright 경로로 바꾼다.
+
+```powershell
+$taskNode = 'C:/Users/USER/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node.exe'
+$env:NODE_PATH = 'C:/Users/USER/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules'
+
+$env:LIVE_CONTROL_OUTPUT = 'artifacts/live-control-repeat-isolated'
+& $taskNode scripts/live_control_e2e.cjs --isolated
+.venv-perception/Scripts/python.exe scripts/analyze_live_controls.py --root $env:LIVE_CONTROL_OUTPUT
+
+$env:LIVE_CONTROL_OUTPUT = 'artifacts/live-control-repeat-ui'
+& $taskNode scripts/live_control_e2e.cjs --ui
+.venv-perception/Scripts/python.exe scripts/analyze_live_controls.py --root $env:LIVE_CONTROL_OUTPUT
+
+./scripts/create_mic_fixtures.ps1
+$env:MIC_E2E_OUTPUT = 'artifacts/mic-policy-repeat'
+& $taskNode scripts/mic_e2e.cjs
+.venv-perception/Scripts/python.exe scripts/analyze_mic_e2e.py
+```
+
+기본 URL은 `http://localhost:4173`이며 `TEST_URL`로 바꿀 수 있다. live 제어 시험은 제어할 시간이 충분하도록 테스트 세션의 응답 길이 지시를 설정하며 서버 응답·음성·영상은 대체하지 않는다. UI 시험은 화면의 실제 컨트롤을 조작한다. 가상 마이크 시험의 WAV 입력은 `artifacts/mic-e2e/`에서 읽고, 출력만 `MIC_E2E_OUTPUT`으로 분리한다. 각 실행의 `report.json`과 분석 JSON을 먼저 확인한 뒤 영상/접촉 시트를 함께 검토한다. 분석의 픽셀·랜드마크 지표만으로 자연스러움을 판정하지 않는다.

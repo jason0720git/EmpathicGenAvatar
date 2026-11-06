@@ -20,7 +20,7 @@ class FakeSocket {
   addEventListener() {}
   removeEventListener() {}
   onopen?: () => void
-  onmessage?: (event: {data: ArrayBuffer}) => void
+  onmessage?: (event: {data: ArrayBuffer|string}) => void
   onclose?: (event: {code:number; wasClean:boolean}) => void
   constructor() { socket = this }
   close() { this.readyState=3;this.onclose?.({code:1000,wasClean:true}) }
@@ -118,7 +118,7 @@ it('never paints a late older speech frame after a newer PTS', async () => {
   expect(draw).not.toHaveBeenCalled()
 })
 
-it('keeps idle live during entry and only permits local face correction', async () => {
+it('keeps idle live and starts the tail from early timing before the binary end packet', async () => {
   // Dispose RAF owners before replacing the timer implementation for this test.
   await act(async()=>root.render(null))
   vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue({canvas:{width:512,height:512},drawImage:draw,save:vi.fn(),restore:vi.fn(),translate:vi.fn(),globalAlpha:1} as unknown as CanvasRenderingContext2D)
@@ -141,10 +141,18 @@ it('keeps idle live during entry and only permits local face correction', async 
   await act(async()=>vi.advanceTimersByTimeAsync(50))
   expect(idle.dataset.parked).toBe('false')
   expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({phase:'completed',pts_ms:1000})}))
-  await act(async()=>{packet(2,1040);packet(2,2000);packet(3,0)})
+  await act(async()=>{
+    socket.onmessage?.({data:JSON.stringify({type:'stream.timing',tail_start_ms:1040,video_end_ms:2040})})
+    // Duplicate or malformed timing must never move the established boundary.
+    socket.onmessage?.({data:JSON.stringify({type:'stream.timing',tail_start_ms:2000,video_end_ms:3000})})
+    socket.onmessage?.({data:'unrelated diagnostic'})
+    packet(2,1040);packet(2,2000)
+  })
   clock=1.25
   await act(async()=>vi.advanceTimersByTimeAsync(80))
+  expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'speech_to_idle',tail_start_ms:1040})}))
   clock=2.3
+  await act(async()=>packet(3,0))
   await act(async()=>vi.advanceTimersByTimeAsync(650))
   expect(idle.dataset.parked).toBe('false')
   expect(api.telemetry).toHaveBeenCalledWith(expect.objectContaining({event:'visual_transition',details:expect.objectContaining({direction:'speech_to_idle',phase:'completed',live_tail_completed:true,fallback:false,source_anchor:false})}))

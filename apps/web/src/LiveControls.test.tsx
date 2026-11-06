@@ -31,3 +31,16 @@ it('distinguishes received, generated and displayed control, ignores stale ackno
     expect(host.textContent).not.toContain('화면 반영')
   }finally{await act(async()=>root.unmount());vi.useRealTimers();vi.unstubAllGlobals()}
 })
+
+it('disables controls when playback feedback expires without a command sequence',async()=>{
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT',true)
+  const host=document.createElement('div'),root=createRoot(host)
+  const socket=Object.assign(new EventTarget(),{readyState:1,send:vi.fn()})
+  try{
+    await act(async()=>root.render(<LiveControls socket={socket as unknown as WebSocket} displayedPts={()=>-1}/>))
+    expect(host.querySelector('fieldset')!.disabled).toBe(false)
+    await act(async()=>socket.dispatchEvent(new MessageEvent('message',{data:JSON.stringify({type:'control.error',detail:'playback feedback timed out'})})))
+    expect(host.querySelector('fieldset')!.disabled).toBe(true)
+    expect(host.textContent).toContain('실시간 제어 종료')
+  }finally{await act(async()=>root.unmount());vi.unstubAllGlobals()}
+})

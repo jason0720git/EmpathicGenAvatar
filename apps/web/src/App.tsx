@@ -703,6 +703,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     let jpegDecodeFailures = 0
     let videoPtsGaps = 0
     let receivedEnd = false
+    let knownTailStart: number | null = null
     let pendingDecodes = 0
     let firstFramePresented = false
     let entryTransition: AvatarTransition | null = null
@@ -763,10 +764,10 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             entryTransition = null
             telemetry('visual_transition', {direction:'idle_to_speech', phase:'completed', strategy:'continuous_geometry_v14', pts_ms:ptsMs, render_peak_ms:Math.round(entryRenderPeakMs*100)/100, idle_parking_allowed:false})
           }
-          // The end marker fixes the actual stream duration. Mix during its
-          // silent tail, while BOTH images still move; never visit a portrait.
-          if (method === 'ditto_realtime_trt10' && receivedEnd && idleAvailable && idleImageRef.current) {
-            const tailStart = lastVideoPacketPts + 40 - EXIT_TAIL_MS
+          // PCM completion fixes tail timing before paced rendering finishes.
+          // Mix while BOTH images still move; do not wait for the last packet.
+          if (method === 'ditto_realtime_trt10' && (knownTailStart !== null || receivedEnd) && idleAvailable && idleImageRef.current) {
+            const tailStart = knownTailStart ?? lastVideoPacketPts + 40 - EXIT_TAIL_MS
             if (ptsMs >= tailStart) {
               // If the end marker arrives late, start from zero opacity,
               // not midway through a blend (which would create another jump).
@@ -852,7 +853,18 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     }
     socket.onmessage = (event) => {
       if (!isCurrent()) return
-      if (typeof event.data === 'string') return // Live-control acknowledgements have a separate listener.
+      if (typeof event.data === 'string') {
+        try {
+          const timing=JSON.parse(event.data)
+          if(timing.type==='stream.timing'&&knownTailStart===null&&
+            Number.isInteger(timing.tail_start_ms)&&timing.tail_start_ms>=0&&
+            Number.isInteger(timing.video_end_ms)&&timing.video_end_ms-timing.tail_start_ms===EXIT_TAIL_MS){
+            knownTailStart=timing.tail_start_ms
+            telemetry('stream_timing',{tail_start_ms:timing.tail_start_ms,video_end_ms:timing.video_end_ms})
+          }
+        }catch{ /* Other diagnostics cannot alter the media clock. */ }
+        return // Live-control acknowledgements have a separate listener.
+      }
       const packet = event.data as ArrayBuffer
       const view = new DataView(packet)
       if (packet.byteLength < 5) return

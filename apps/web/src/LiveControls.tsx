@@ -18,6 +18,9 @@ export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebS
       if(typeof event.data!=='string')return
       try {
         const data=JSON.parse(event.data)
+        if(data.type==='control.error'&&data.seq===undefined){
+          pending.current=null;setConnected(false);setStatus(`실시간 제어 종료: ${data.detail}`);return
+        }
         if(data.seq!==seq.current)return
         if(data.type==='control.received')setStatus(`명령 ${data.seq} 수신 · 생성 대기`)
         if(data.type==='control.applied'){

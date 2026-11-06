@@ -1,11 +1,12 @@
 """Summarize actual displayed-frame boundaries; these are proxies, not naturalness scores."""
 import json
+import os
 from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-root = Path('artifacts/mic-e2e')
+root = Path(os.environ.get('MIC_E2E_OUTPUT', 'artifacts/mic-e2e'))
 summary = []
 for name in ['normal', 'short', 'interrupt', 'auto']:
     directory = root / name

@@ -172,3 +172,18 @@ def test_consumers_without_playback_feedback_keep_offline_throughput():
     control,_=state()
     control.wait_for_frame(20000)
     assert control.receive({'type':'control','seq':1,'intensity':.4})['seq']==1
+
+
+def test_early_timing_uses_completed_pcm_with_exact_rounded_tail_endpoint():
+    from app.main import RealtimePcmTimeline
+    timeline=RealtimePcmTimeline(25,25)
+    timeline.append(np.zeros(641,np.int16))  # Partial final PCM frame rounds up.
+    assert timeline.final_timing() is None
+    timeline.finish()
+    assert timeline.final_timing()=={'type':'stream.timing','tail_start_ms':1080,'video_end_ms':2080}
+    assert timeline.final_timing()['video_end_ms']==timeline.frame_count()*40
+    assert timeline.accepts_video(2040) and not timeline.accepts_video(2080)
+    with pytest.raises(ValueError,match='completion'):
+        timeline.append(np.zeros(640,np.int16))
+    timeline.cancel()
+    assert timeline.final_timing() is None
