@@ -3,6 +3,7 @@ import { beginIdleEntryTransition, beginTransition, drawTransition, drawLiveExit
 import { GeometryHandoff, warmGeometryHandoff } from './geometryHandoff'
 import { PerceptionPanel, type PerceptionHandle } from './PerceptionPanel'
 import { IdleCanvas } from './IdleCanvas'
+import { LiveControls } from './LiveControls'
 import { ListeningPolicy, type ListeningCue } from './listeningPolicy'
 import { TurnDiagnostics } from './TurnDiagnostics'
 import './rendered-video.css'
@@ -579,6 +580,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const realtimeCanvasRef = useRef<HTMLCanvasElement>(null)
   const idleImageRef = useRef<HTMLCanvasElement>(null)
   const realtimeSocketRef = useRef<WebSocket | null>(null)
+  const displayedPtsRef = useRef(-1)
   const realtimeAudioRef = useRef<AudioContext | null>(null)
   const sessionRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
@@ -669,6 +671,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
 
   const startRealtime = (streamPath: string, turnId: string, turnStartedAt: number) => {
     stopRealtime()
+    displayedPtsRef.current=-1
     const context = new AudioContext()
     realtimeAudioRef.current = context
     // Do not anchor media time when the socket opens: GPU warm-up can take
@@ -772,6 +775,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             }
           }
           lastPresentedPts = ptsMs
+          displayedPtsRef.current=ptsMs
           if (!firstFramePresented) {
             firstFramePresented = true
             setStreamReady(true)
@@ -840,6 +844,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     }
     socket.onmessage = (event) => {
       if (!isCurrent()) return
+      if (typeof event.data === 'string') return // Live-control acknowledgements have a separate listener.
       const packet = event.data as ArrayBuffer
       const view = new DataView(packet)
       if (packet.byteLength < 5) return
@@ -1203,6 +1208,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
           <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? (affectMode === 'auto' ? '얼굴 관측 → 표정 · 진단 강도 65% · API 토큰 없음' : '고정 WAV · API 토큰 사용 없음') : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
+          {method==='ditto_realtime_trt10'&&<LiveControls socket={realtimeActive?realtimeSocketRef.current:null} displayedPts={()=>displayedPtsRef.current}/>}
           <div className="nonverbal-controls">
             <label>발화 시선 <select aria-label="발화 시선" value={gazeTest} disabled={state !== 'ready'} onChange={event => setGazeTest(event.target.value as typeof gazeTest)}>
               <option value="default">기존 자동</option><option value="center">정면 유지</option>
