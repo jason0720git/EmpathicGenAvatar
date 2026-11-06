@@ -3,10 +3,11 @@
 // No transcript injection or mocked network responses. Uses synthetic WAV only.
 const {chromium}=require('playwright');
 const path=require('node:path'), fs=require('node:fs');
-const out=path.resolve('artifacts/mic-e2e');
+const fixtures=path.resolve('artifacts/mic-e2e');
+const out=path.resolve(process.env.MIC_E2E_OUTPUT||'artifacts/mic-e2e');
 async function run(name){
  const dir=path.join(out,name);fs.mkdirSync(dir,{recursive:true});
- const browser=await chromium.launch({channel:'chrome',headless:true,args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream',`--use-file-for-fake-audio-capture=${path.join(out,(name==='auto'?'normal':name)+'.wav')}%noloop`,'--autoplay-policy=no-user-gesture-required']});
+ const browser=await chromium.launch({channel:'chrome',headless:true,args:['--use-fake-ui-for-media-stream','--use-fake-device-for-media-stream',`--use-file-for-fake-audio-capture=${path.join(fixtures,(name==='auto'?'normal':name)+'.wav')}%noloop`,'--autoplay-policy=no-user-gesture-required']});
  let report={name,stt:[],telemetry:[],requests:[],errors:[]};
  try {
   const context=await browser.newContext({permissions:['microphone'],viewport:{width:1400,height:1000}});

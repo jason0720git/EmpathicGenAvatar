@@ -39,7 +39,7 @@ import {
 } from 'lucide-react'
 import { ApiError, api } from './api'
 import { localTurn } from './localTurn'
-import type { AffectIntent, Avatar, ExpressionIntent, LiveState, TranscriptItem, TurnResponse } from './types'
+import type { AffectIntent, Avatar, ExpressionIntent, LiveState, TranscriptItem, TurnResponse, MotionPlan } from './types'
 
 type Page = 'dashboard' | 'avatars' | 'create' | 'method' | 'live'
 type ConversationMethod = 'ditto' | 'ditto_realtime' | 'ditto_realtime_fast' | 'ditto_realtime_trt10'
@@ -581,6 +581,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   const idleImageRef = useRef<HTMLCanvasElement>(null)
   const realtimeSocketRef = useRef<WebSocket | null>(null)
   const displayedPtsRef = useRef(-1)
+  const liveMotionRef = useRef<MotionPlan|undefined>(undefined)
   const realtimeAudioRef = useRef<AudioContext | null>(null)
   const sessionRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
@@ -712,6 +713,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     let exitStartPts: number | null = null
     const exitGeometry = new GeometryHandoff()
     let lastPresentedPts = -1
+    let lastFeedbackPts = -160
     const isCurrent = () => mountedRef.current && realtimeAudioRef.current === context
     let peakAudioDelayMs = 0
     const elapsed = () => Math.max(0, Math.round(performance.now() - turnStartedAt))
@@ -776,6 +778,11 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           }
           lastPresentedPts = ptsMs
           displayedPtsRef.current=ptsMs
+          canvas.dataset.ptsMs=String(ptsMs)
+          if(method==='ditto_realtime_trt10'&&socket.readyState===1&&ptsMs-lastFeedbackPts>=160){
+            socket.send(JSON.stringify({type:'playback',pts_ms:ptsMs}))
+            lastFeedbackPts=ptsMs
+          }
           if (!firstFramePresented) {
             firstFramePresented = true
             setStreamReady(true)
@@ -837,6 +844,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     socket.binaryType = 'arraybuffer'
     realtimeSocketRef.current = socket
     socket.onopen = () => {
+      if(method==='ditto_realtime_trt10'&&socket.readyState===1)socket.send(JSON.stringify({type:'playback',pts_ms:-1}))
       setRealtimeActive(true)
       setAudioLevel(0.5)
       void context.resume()
@@ -1005,6 +1013,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       if (!mountedRef.current) return
       perceptionRef.current?.showTurn(result)
       const applied = result.renderer.applied_motion
+      liveMotionRef.current=applied
       setDiagnosticTurns(items => [...items, {id: result.turn_id, label: `${applied?.expression ?? affectMode} / ${applied?.expression_render_mode ?? expressionRenderMode} / ${Math.round((applied?.intensity ?? affectIntensity)*100)}% · ${result.turn_id}`}].slice(-50))
       setFeedbackTurn(result.turn_id); setFeedbackStatus(''); setFeedbackSecond(''); setFeedbackNote('')
       if (apiOnline) void api.telemetry({ turn_id: result.turn_id, event: 'turn_response', elapsed_ms: Math.round(performance.now() - turnStartedAt) })
@@ -1208,7 +1217,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
           <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? (affectMode === 'auto' ? '얼굴 관측 → 표정 · 진단 강도 65% · API 토큰 없음' : '고정 WAV · API 토큰 사용 없음') : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
-          {method==='ditto_realtime_trt10'&&<LiveControls socket={realtimeActive?realtimeSocketRef.current:null} displayedPts={()=>displayedPtsRef.current}/>}
+          {method==='ditto_realtime_trt10'&&<LiveControls socket={realtimeActive?realtimeSocketRef.current:null} displayedPts={()=>displayedPtsRef.current} baseline={liveMotionRef.current}/>}
           <div className="nonverbal-controls">
             <label>발화 시선 <select aria-label="발화 시선" value={gazeTest} disabled={state !== 'ready'} onChange={event => setGazeTest(event.target.value as typeof gazeTest)}>
               <option value="default">기존 자동</option><option value="center">정면 유지</option>
@@ -1265,7 +1274,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           {captions.length === 0 ? <div className="empty-transcript"><span><MessageSquareText size={25} /></span><strong>대화를 시작해 보세요</strong><p>마이크 버튼을 누르거나 아래에 메시지를 입력하세요.</p></div> : captions.map((item) => <div key={item.id} className={`message ${item.role}`}><span className="message-avatar">{item.role === 'assistant' ? <Sparkles size={13} /> : 'J'}</span><div><small>{item.role === 'assistant' ? `${avatar.name} · AI Avatar` : '나'}</small><p>{item.text}</p></div></div>)}
           {state === 'thinking' && <div className="message assistant loading-message"><span className="message-avatar"><Sparkles size={13} /></span><div><small>{avatar.name} · AI Avatar</small><p><i /><i /><i /></p></div></div>}
         </div>
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitTurn(draft) }}><button type="button" className={`composer-mic ${state === 'listening' ? 'active' : ''}`} disabled={!voiceSupported || state === 'connecting' || state === 'thinking'} onClick={toggleVoiceInput} aria-label={state === 'listening' ? '음성 입력 종료 및 전송' : '음성 입력 시작'}>{state === 'listening' ? <Pause size={17} /> : <Mic size={17} />}</button><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={state === 'listening' ? '듣는 중… 말한 내용이 여기에 표시됩니다.' : '메시지 입력…'} rows={1} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submitTurn(draft) } }} /><button type="submit" disabled={!draft.trim() || state === 'thinking'} aria-label="메시지 보내기"><SendHorizontal size={17} /></button></form>
+        <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitTurn(draft) }}><button type="button" className={`composer-mic ${state === 'listening' ? 'active' : ''}`} disabled={!voiceSupported || state === 'connecting' || state === 'thinking'} onClick={toggleVoiceInput} aria-label={state === 'listening' ? '음성 입력 종료 및 전송' : '음성 입력 시작'}>{state === 'listening' ? <Pause size={17} /> : <Mic size={17} />}</button><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={state === 'listening' ? '듣는 중… 말한 내용이 여기에 표시됩니다.' : '메시지 입력…'} rows={1} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submitTurn(draft) } }} /><button type="submit" disabled={!sessionId || state === 'connecting' || !draft.trim() || state === 'thinking'} aria-label="메시지 보내기"><SendHorizontal size={17} /></button></form>
         <div className="caption-footnote"><span><span className="keycap">↵</span> 보내기</span>{voiceSupported ? <span><Mic size={13} /> {voiceTurnMode === 'push_to_talk' ? '두 번 눌러 음성 전송' : 'VAD 자동 전송'}</span> : <span>텍스트 대화 사용 가능</span>}</div>
         {lastAssistant && <button className="replay-button" onClick={() => speak({ turn_id: lastAssistant.id, assistant_text: lastAssistant.text, visemes: [], renderer: { mode: 'preview', status: 'replay' } }, avatar.voice, setState, setAudioLevel)}><Play size={14} /> 마지막 답변 다시 듣기</button>}
       </aside>}

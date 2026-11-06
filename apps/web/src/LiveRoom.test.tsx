@@ -15,11 +15,15 @@ let host: HTMLDivElement
 let socket: FakeSocket
 const draw = vi.fn()
 class FakeSocket {
+  readyState=1
+  send=vi.fn()
+  addEventListener() {}
+  removeEventListener() {}
   onopen?: () => void
   onmessage?: (event: {data: ArrayBuffer}) => void
   onclose?: (event: {code:number; wasClean:boolean}) => void
   constructor() { socket = this }
-  close() { this.onclose?.({code:1000,wasClean:true}) }
+  close() { this.readyState=3;this.onclose?.({code:1000,wasClean:true}) }
 }
 class FakeAudio {
   get currentTime() { return clock }
@@ -63,12 +67,24 @@ async function send() {
   })
   await act(async () => host.querySelector('form.composer')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})))
 }
+it('disables message submission until the Realtime session exists',async()=>{
+  vi.mocked(api.createSession).mockReturnValue(new Promise(()=>{}))
+  await act(async()=>root.render(<LiveRoom key="connecting" avatar={{id:'a',name:'Test',persona:'test',voice:'test',status:'ready',created_at:'',engine:'remote'}} method="ditto_realtime_trt10" sessionInstruction="test" apiOnline onExit={()=>{}}/>))
+  await act(async()=>{
+    const textarea=host.querySelector('textarea')!
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(textarea,'아직 연결 중')
+    textarea.dispatchEvent(new Event('input',{bubbles:true}))
+  })
+  expect(host.querySelector<HTMLButtonElement>('[aria-label="메시지 보내기"]')!.disabled).toBe(true)
+  expect(api.sendTurn).not.toHaveBeenCalled()
+})
 it('keeps idle loaded until the first frame is drawn and hands back at actual last PTS', async () => {
   const idle = host.querySelector('.idle-avatar-video')!
   const url = idle.getAttribute('data-source')
   await act(async () => idle.dispatchEvent(new Event('load')))
   await send()
   await act(async () => { socket.onopen?.(); packet(2,0); packet(1,0); packet(2,400) })
+  expect(JSON.parse(socket.send.mock.calls[0][0])).toEqual({type:'playback',pts_ms:-1})
   expect(idle.getAttribute('data-source')).toBe(url)
   expect(idle.classList.contains('hidden')).toBe(false)
   expect(host.querySelector('canvas.rendered-avatar-video')!.classList.contains('visible')).toBe(false)
@@ -76,6 +92,7 @@ it('keeps idle loaded until the first frame is drawn and hands back at actual la
   await act(async () => vi.advanceTimersByTimeAsync(250))
   expect(draw).toHaveBeenCalled()
   expect(host.querySelector('canvas.rendered-avatar-video')!.classList.contains('visible')).toBe(true)
+  expect(socket.send.mock.calls.map(c=>JSON.parse(c[0]))).toContainEqual({type:'playback',pts_ms:0})
   await act(async () => packet(3,0))
   clock=.7
   await act(async () => vi.advanceTimersByTimeAsync(100))

@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 
 type Target = {expression:string;intensity:number;head:{yaw_deg:number;pitch_deg:number;roll_deg:number};gaze:{x:number;y:number}}
 const initial:Target={expression:'neutral',intensity:.4,head:{yaw_deg:0,pitch_deg:0,roll_deg:0},gaze:{x:0,y:0}}
-export function LiveControls({socket,displayedPts}:{socket:WebSocket|null;displayedPts:()=>number}) {
+export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebSocket|null;displayedPts:()=>number;baseline?:Target}) {
   const [target,setTarget]=useState<Target>(initial)
   const [status,setStatus]=useState('발화가 시작되면 조절할 수 있습니다.')
   const [connected,setConnected]=useState(false)
   const seq=useRef(0), pending=useRef<{seq:number;pts:number}|null>(null)
   const readPts=useRef(displayedPts); readPts.current=displayedPts
+  const base=useRef(baseline);base.current={expression:baseline.expression,intensity:baseline.intensity,head:{...baseline.head},gaze:{x:baseline.gaze.x,y:baseline.gaze.y}}
   useEffect(()=>{
-    seq.current=0;pending.current=null;setTarget(initial)
+    seq.current=0;pending.current=null;setTarget(base.current)
     setConnected(socket?.readyState===1)
     setStatus(socket?.readyState===1?'현재 발화에 적용할 값을 선택하세요.':'발화가 시작되면 조절할 수 있습니다.')
     if(!socket)return
@@ -26,7 +27,7 @@ export function LiveControls({socket,displayedPts}:{socket:WebSocket|null;displa
         if(data.type==='control.error'){pending.current=null;setStatus(`적용 안 됨: ${data.detail}`)}
       }catch{ /* Unrelated diagnostic message. */ }
     }
-    const close=()=>{setConnected(false);pending.current=null;setStatus('발화 종료 · 다음 발화는 자동 정책으로 시작합니다.')}
+    const close=()=>{setConnected(false);if(!pending.current)setStatus('생성 종료 · 이미 생성된 프레임은 변경할 수 없습니다.')}
     socket.addEventListener('message',receive);socket.addEventListener('close',close)
     const timer=window.setInterval(()=>{
       if(pending.current&&readPts.current()>=pending.current.pts){setStatus(`명령 ${pending.current.seq} 화면 반영 · ${pending.current.pts}ms부터 부드럽게 전환`);pending.current=null}
@@ -38,7 +39,8 @@ export function LiveControls({socket,displayedPts}:{socket:WebSocket|null;displa
     if(socket?.readyState!==1)return
     pending.current=null
     const id=++seq.current
-    socket.send(JSON.stringify(reset?{type:'control.reset',seq:id}:{type:'control',seq:id,...next}))
+    const changed=Object.fromEntries(Object.entries(next).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(target[key as keyof Target])))
+    socket.send(JSON.stringify(reset?{type:'control.reset',seq:id}:{type:'control',seq:id,...changed}))
     setStatus(`명령 ${id} 전송`)
   }
   return <details className="live-controls"><summary>발화 중 얼굴·머리·시선 제어</summary>
@@ -50,7 +52,7 @@ export function LiveControls({socket,displayedPts}:{socket:WebSocket|null;displa
       <label>표정 강도 {target.intensity.toFixed(2)}<input aria-label="실시간 표정 강도" type="range" min="0" max=".8" step=".05" value={target.intensity} onChange={e=>send({...target,intensity:Number(e.target.value)})}/></label>
       {([['yaw_deg','머리 좌우',-6,6],['pitch_deg','머리 상하',-5,5],['roll_deg','머리 기울기',-3,3]] as const).map(([axis,label,min,max])=><label key={axis}>{label} {target.head[axis].toFixed(1)}°<input aria-label={label} type="range" min={min} max={max} step=".5" value={target.head[axis]} onChange={e=>send({...target,head:{...target.head,[axis]:Number(e.target.value)}})}/></label>)}
       {([['x','시선 좌우'],['y','시선 상하']] as const).map(([axis,label])=><label key={axis}>{label} {target.gaze[axis].toFixed(2)}<input aria-label={label} type="range" min="-.8" max=".8" step=".05" value={target.gaze[axis]} onChange={e=>send({...target,gaze:{...target.gaze,[axis]:Number(e.target.value)}})}/></label>)}
-      <button type="button" onClick={()=>send(initial,true)}>자동 동작으로 복귀</button>
+      <button type="button" onClick={()=>send(base.current,true)}>자동 동작으로 복귀</button>
     </fieldset><small role="status" aria-label="실시간 제어 상태">{status}</small>
   </details>
 }

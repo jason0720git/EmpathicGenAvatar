@@ -27,6 +27,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from .live_controls import LiveControlState
 
 
 class PrepareIn(BaseModel):
@@ -197,6 +198,11 @@ class BlinkAwareMotionStitch:
         self.speech_timeline = None
         self.speech_gain = 0.0
         self.last_speech_pupil = None
+        self.live_controls = None
+        self.live_preroll = 0
+        self.live_timeline = None
+        self.speech_start_frame = None
+        self.speech_expression = 'neutral'
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
 
     def setup(self, *args, **kwargs):
@@ -204,6 +210,9 @@ class BlinkAwareMotionStitch:
         self.speech_timeline = None
         self.speech_gain = 0.0
         self.last_speech_pupil = None
+        self.live_controls = None
+        self.live_timeline = None
+        self.speech_start_frame = None
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
         return self.inner.setup(*args, **kwargs)
 
@@ -211,9 +220,15 @@ class BlinkAwareMotionStitch:
         self.boundary_timeline = timeline
         self.boundary_preroll = preroll
 
-    def set_speech_timeline(self, timeline, preroll):
+    def set_speech_timeline(self, timeline, preroll, expression='neutral'):
         self.speech_timeline = timeline
         self.speech_preroll = preroll
+        self.speech_expression = expression
+
+    def set_live_controls(self, controls, preroll, timeline=None):
+        self.live_controls = controls
+        self.live_preroll = preroll
+        self.live_timeline = timeline
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
@@ -223,8 +238,16 @@ class BlinkAwareMotionStitch:
             frame = self.inner.idx - self.speech_preroll
             rms = self.speech_timeline.frame_rms(frame)
             energy = float(np.clip((20*np.log10(max(rms or 0, 1e-7))+54)/35, 0, 1))
-            target = (0.70 + .30*energy) if rms is not None else 0.0
-            tau = .18 if target > self.speech_gain else .32
+            if rms is not None and self.speech_start_frame is None:
+                self.speech_start_frame = frame
+            elapsed = max(0,frame-(self.speech_start_frame if self.speech_start_frame is not None else frame))*.04
+            settle_phase = float(np.clip((elapsed-.8)/1.2,0,1))
+            settle = 1-.12*settle_phase*settle_phase*(3-2*settle_phase)
+            # One entrance/settle trajectory per utterance, not one emotional
+            # peak per syllable. The energy contribution is deliberately small.
+            target = (.95+.05*energy)*settle if rms is not None else 0.0
+            attack = .28 if self.speech_expression == 'happy' else .55 if self.speech_expression in ('sad','fear') else .42
+            tau = attack if target > self.speech_gain else .60
             self.speech_gain += (target-self.speech_gain)*(1-np.exp(-.04/tau))
             adjusted = kwargs["delta_exp"].copy().reshape(21,3)
             # Modulate selected affect only; preserve independent pupil intent.
@@ -239,6 +262,11 @@ class BlinkAwareMotionStitch:
                 adjusted[[11, 15]] = self.last_speech_pupil if self.last_speech_pupil is not None else 0
             adjusted[[11, 15]] *= self.speech_timeline.boundary_weight(frame)
             kwargs["delta_exp"] = adjusted.reshape(1,63)
+        if self.live_controls is not None:
+            live_frame = self.inner.idx-self.live_preroll
+            self.live_controls.wait_for_frame(live_frame*40)
+            boundary_weight = self.live_timeline.boundary_weight(live_frame) if self.live_timeline is not None else 1
+            kwargs = self.live_controls.apply(kwargs, live_frame*40, boundary_weight)
         protect = kwargs.pop("preserve_speech_lips", False)
         smile_corners = kwargs.pop("allow_smile_corners", False)
         boundary_alpha = kwargs.pop("boundary_alpha", None)
@@ -483,6 +511,26 @@ def record_ditto_affect_diagnostic(data_root: Path, payload: dict[str, object]) 
     except OSError as error:
         # Diagnostics must never make the speech/video path unavailable.
         print(f"Ditto affect diagnostic write failed: {error}", flush=True)
+
+
+def live_target_controls(base: MotionPlan, patch: dict) -> dict:
+    """Compile only owned channels; keep Audio2Motion conditioning unchanged."""
+    target = {}
+    if 'expression' in patch or 'intensity' in patch:
+        plan = base.model_copy(update={
+            'expression':patch.get('expression',base.expression),
+            'intensity':patch.get('intensity',base.intensity),
+            'expression_render_mode':'speech_safe','gaze':GazeIntent(mode='pupil'),
+            'head':HeadPose(),'nod':None,
+        })
+        control = build_ditto_ctrl_info(plan,50,hold_expression_end=True)[25]
+        target['face'] = np.asarray(control.get('delta_exp',np.zeros((1,63))),dtype=np.float32).reshape(21,3)
+        target['expression'] = plan.expression
+    if 'gaze' in patch:
+        target['gaze'] = pupil_gaze_delta(GazeIntent(mode='pupil',**patch['gaze'])).reshape(21,3)
+    if 'head' in patch:
+        target['head'] = np.array([patch['head'][key] for key in ('yaw_deg','pitch_deg','roll_deg')],np.float32)
+    return target
 
 
 def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) -> dict[int, dict[str, float | np.ndarray]]:
@@ -818,6 +866,8 @@ class LiveTurn:
     websocket_connected: asyncio.Event | None = None
     playback_started: asyncio.Event | None = None
     video_pts: asyncio.Queue[int] | None = None
+    controls: LiveControlState | None = None
+    control_events: asyncio.Queue[dict] | None = None
 
 
 class DittoLiveRuntime:
@@ -1449,6 +1499,15 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             playback_started=playback_started,
             video_pts=asyncio.Queue(maxsize=1024),
         )
+        if os.getenv('DITTO_LIVE_CONTROLS','0') == '1':
+            turn.control_events = asyncio.Queue(maxsize=128)
+            loop = asyncio.get_running_loop()
+            def applied(event):
+                def enqueue():
+                    with contextlib.suppress(asyncio.QueueFull):
+                        turn.control_events.put_nowait(event)
+                loop.call_soon_threadsafe(enqueue)
+            turn.controls = LiveControlState(lambda patch: live_target_controls(body.motion_plan or MotionPlan(),patch),applied)
         timeline = RealtimePcmTimeline(DITTO_TURN_LEAD_FRAMES, DITTO_TURN_TAIL_FRAMES)
         metrics = RealtimeTurnMetrics()
         task = asyncio.create_task(self._run_realtime(body, turn, timeline, metrics, audio_dir), name=f"ditto-realtime-{body.turn_id}")
@@ -1458,6 +1517,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         if body.session_id:
             self._session_turns[body.session_id] = body.turn_id
         task.add_done_callback(self._report_task_error)
+        if turn.controls:
+            task.add_done_callback(lambda _: turn.controls.close())
         return f"/avatar-stream/v1/live/{body.turn_id}", None
 
     async def _run_realtime(
@@ -1593,6 +1654,8 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             timeline.cancel()
         turn = self.turns.get(turn_id)
         if turn and not turn.task.done():
+            if turn.controls:
+                turn.controls.close()
             turn.task.cancel()
 
     def _run_realtime_sdk(
@@ -1722,8 +1785,10 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             profile_events.append(("turn_setup", setup_started_at, time.monotonic()))
         setup_nd_started_at = time.monotonic()
         sdk.setup_Nd(target_frames, ctrl_info=ctrl_info)
+        if turn.controls:
+            sdk.motion_stitch.set_live_controls(turn.controls, preroll_frames, timeline)
         if motion_plan.temporal_policy == "sobia":
-            sdk.motion_stitch.set_speech_timeline(timeline, preroll_frames)
+            sdk.motion_stitch.set_speech_timeline(timeline, preroll_frames, motion_plan.expression)
         # Do not pull speech endpoints toward the source portrait. The browser
         # hands native moving lead/tail frames directly to the live idle stream.
         if profile_enabled:
@@ -2137,15 +2202,62 @@ def create_app() -> FastAPI:
         await websocket.accept()
         turn.websocket_connected.set()
         packet_type = {"audio": 1, "video": 2, "end": 3}
-        try:
+        events = turn.control_events if turn.control_events is not None else asyncio.Queue(maxsize=128)
+
+        async def receive_controls():
             while True:
-                kind, pts_ms, payload = await turn.packets.get()
-                await websocket.send_bytes(struct.pack(">BI", packet_type[kind], pts_ms) + payload)
-                if kind == "end":
-                    await websocket.close()
-                    break
+                raw = await websocket.receive_text()
+                payload = None
+                try:
+                    if len(raw)>4096:
+                        raise ValueError('control message too large')
+                    payload = json.loads(raw)
+                    if not isinstance(payload,dict):
+                        raise ValueError('expected control object')
+                    if turn.controls is None:
+                        raise ValueError('live controls are not enabled for this renderer')
+                    if payload.get('type') == 'playback':
+                        turn.controls.playback(payload)
+                        continue
+                    if turn.task.done():
+                        raise ValueError('rendering finished; controls cannot change buffered frames')
+                    await events.put(turn.controls.receive(payload))
+                except (ValueError,TypeError) as error:
+                    await events.put({'type':'control.error','seq':payload.get('seq') if isinstance(payload,dict) else None,'detail':str(error)[:600]})
+
+        async def send_packets():
+            packet = asyncio.create_task(turn.packets.get())
+            status = asyncio.create_task(events.get())
+            try:
+                while True:
+                    ready,_ = await asyncio.wait((packet,status),return_when=asyncio.FIRST_COMPLETED)
+                    if status in ready:
+                        await websocket.send_json(status.result())
+                        status = asyncio.create_task(events.get())
+                    if packet in ready:
+                        kind,pts_ms,payload = packet.result()
+                        await websocket.send_bytes(struct.pack('>BI',packet_type[kind],pts_ms)+payload)
+                        if kind == 'end':
+                            await websocket.close()
+                            return
+                        packet = asyncio.create_task(turn.packets.get())
+            finally:
+                packet.cancel();status.cancel()
+                await asyncio.gather(packet,status,return_exceptions=True)
+
+        sender = asyncio.create_task(send_packets())
+        receiver = asyncio.create_task(receive_controls())
+        try:
+            finished,_ = await asyncio.wait((sender,receiver),return_when=asyncio.FIRST_COMPLETED)
+            for task in finished:
+                task.result()
         except WebSocketDisconnect:
             return
+        finally:
+            sender.cancel();receiver.cancel()
+            await asyncio.gather(sender,receiver,return_exceptions=True)
+            if turn.controls:
+                turn.controls.close()
 
     @app.get("/v1/assets/live/{turn_id}")
     async def live_asset(turn_id: str) -> StreamingResponse:
