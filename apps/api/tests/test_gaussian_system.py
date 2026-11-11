@@ -164,6 +164,23 @@ def test_tool_semantics_survive_controller_and_nod_is_not_applied_twice():
     assert frame["behavior"]["confidence"] == .88
 
 
+def test_audio_buffered_frames_are_summarized_under_the_displayed_turn(tmp_path):
+    from app.gaussian_review import summary
+
+    log = SessionLog(tmp_path, "a"*24, {"id": "a"*24})
+    for tid in ("first", "next"):
+        log.record("behavior.plan", {"turn_id": tid, "details": {"emotion": "sad"}})
+    for smile in (.2, .4):
+        log.record("playback.telemetry", {"turn_id": "next", "details": {
+            "event": "motion.sample", "tracking_stage": "displayed",
+            "rendered_frame": {"turn_id": "first", "weights": {"mouthSmileLeft": smile}},
+        }})
+    report = summary(log.path)
+    values = report["turns"]["first"]["sampled_ranges"]["displayed_mouthSmileLeft"]
+    assert values == pytest.approx({"n": 2, "min": .2, "mean": .3, "max": .4})
+    assert "sampled_ranges" not in report["turns"]["next"]
+
+
 @pytest.mark.parametrize("name", ["../outside", "/outside", "C:/outside", "dir/../../outside", r"dir\..\..\outside"])
 def test_asset_zip_rejects_path_escape(tmp_path, name):
     with TestClient(create_gaussian_app(tmp_path, api_key="")) as client:

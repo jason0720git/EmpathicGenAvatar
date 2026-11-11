@@ -432,7 +432,7 @@ class GaussianRoom:
                         gaze={"x": control.gaze_x, "y": control.gaze_y})
                     self.manual_start = time.monotonic()
                     self.trace("control.override", control.model_dump())
-                    await self.emit("behavior", plan=self.active_plan().as_dict(), manual=self.manual is not None)
+                    await self.emit("behavior", plan=self.active_plan().as_dict(bake_nod=False), manual=self.manual is not None)
                 elif kind == "perception":
                     enabled = bool(packet.get("enabled"))
                     try:
@@ -504,8 +504,8 @@ class GaussianRoom:
                 move=chosen.move, stance=chosen.stance, confidence=chosen.confidence,
                 head=chosen.head.model_dump(), gaze=chosen.gaze.model_dump(),
                 source="manual_expression" if self.manual else "llm_tool_call")
-            self.trace("behavior.plan", plan.as_dict())
-            await self.emit("behavior", turn_id=turn_id, plan=self.active_plan(plan).as_dict(), manual=self.manual is not None)
+            self.trace("behavior.plan", plan.as_dict(bake_nod=False))
+            await self.emit("behavior", turn_id=turn_id, plan=self.active_plan(plan).as_dict(bake_nod=False), manual=self.manual is not None)
             a2f_task = asyncio.create_task(animate())
 
         async def enqueue(item):

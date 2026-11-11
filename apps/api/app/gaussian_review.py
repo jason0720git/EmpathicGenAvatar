@@ -18,14 +18,15 @@ def summary(directory: Path) -> dict:
     nod_outcomes, face_states = Counter(), Counter()
     invalid = 0
 
-    def measure(key, value):
+    def measure(key, value, bucket=None):
         if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value):
             return
-        stats = ranges.setdefault(key, {"min": value, "max": value, "n": 0, "sum": 0.})
+        target = ranges if bucket is None else bucket
+        stats = target.setdefault(key, {"min": value, "max": value, "n": 0, "mean": 0.})
         stats["min"] = min(stats["min"], value)
         stats["max"] = max(stats["max"], value)
-        stats["sum"] += value
         stats["n"] += 1
+        stats["mean"] += (value - stats["mean"]) / stats["n"]
 
     with (directory / "events.jsonl").open(encoding="utf8") as stream:
         for line in stream:
@@ -70,6 +71,11 @@ def summary(directory: Path) -> dict:
             if settings and (not control_settings or settings != control_settings[-1]):
                 control_settings.append(settings)
             frame = mapping(d.get("rendered_frame"))
+            # Use the painted frame's turn, which can differ from the server's
+            # current turn while audio drains or before a new frame is painted.
+            frame_turn = frame.get("turn_id")
+            speaking_turn = turns.get(frame_turn) if isinstance(frame_turn, str) else None
+            turn_ranges = speaking_turn.setdefault("sampled_ranges", {}) if speaking_turn is not None else None
             policy = mapping(mapping(frame.get("natural_motion")).get("policy"))
             if isinstance(policy.get("state"), str):
                 face_states[policy["state"]] += 1
@@ -80,15 +86,19 @@ def summary(directory: Path) -> dict:
                 drivers[motion["driver"]] += 1
             for axis in ("pitch", "yaw", "roll"):
                 measure(f"{stage}_command_{axis}_deg", head.get(axis))
-                measure("renderer_" + axis + "_deg", mapping(motion.get("applied")).get(axis))
+                actual = mapping(motion.get("applied")).get(axis)
+                measure("renderer_" + axis + "_deg", actual)
+                if turn_ranges is not None:
+                    measure("renderer_" + axis + "_deg", actual, turn_ranges)
             measure("renderer_torso_drift_mm", motion.get("torsoDriftMm"))
             for name in ("browInnerUp", "eyeBlinkLeft", "cheekSquintLeft", "mouthSmileLeft", "mouthFrownLeft", "jawOpen"):
-                measure(f"{stage}_{name}", mapping(frame.get("weights")).get(name))
+                value = mapping(frame.get("weights")).get(name)
+                measure(f"{stage}_{name}", value)
+                if turn_ranges is not None:
+                    measure(f"{stage}_{name}", value, turn_ranges)
             measure("renderer_compute_ms", d.get("renderMs"))
             measure("renderer_round_trip_ms", d.get("roundTripMs"))
             measure("sync_timeouts", d.get("sync_timeouts"))
-    for stats in ranges.values():
-        stats["mean"] = stats.pop("sum") / stats["n"]
     return {**result, "schema": 1, "motion_samples": sum(stages.values()), "sample_stages": dict(stages),
             "head_drivers": dict(drivers), "sampled_ranges": ranges, "events": dict(counts),
             "policy_events": dict(policies), "nod_decisions": dict(nod_outcomes),

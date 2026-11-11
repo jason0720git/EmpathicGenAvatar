@@ -48,9 +48,13 @@ class BehaviorPlan:
     stance: str | None = None
     confidence: float | None = None
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self, *, bake_nod: bool = True) -> dict[str, Any]:
         result = asdict(self)
         result["head_units"] = "degrees"
+        if not bake_nod:
+            # Cue arbitration chooses the actual stroke at playback time.
+            del result["nod_duration_seconds"], result["nod_amplitude_degrees"]
+            result["nod_owner"] = "playback_policy"
         result["provenance"] = "LLM tool selects intent in auto; manual selection overrides it. Deterministic ARKit composition; no trained empathy model loaded."
         return result
 
@@ -152,7 +156,7 @@ class BehaviorController:
             "head": {key: round(value, 5) for key, value in head.items()},
             "head_units": "degrees",
             "gaze": gaze,
-            "behavior": plan.as_dict(),
+            "behavior": plan.as_dict(bake_nod=bake_nod),
             "composition": {"articulation_owner": "nvidia_a2f" if speaking else "neutral",
                             "expression_owner": plan.source, "eye_head_owner": plan.source,
                             "smile_guard": no_bright_smile, "speaking": speaking},
