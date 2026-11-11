@@ -60,13 +60,25 @@ function motionEnvelope(age: number, lag: number, rise: number, hold: number,
   return attack * lerp(1, lerp(rest, 1, .75*accent), decay) * (1-.39*boundary)
 }
 
-export function sampleCompanionFace(performance: Performance, now: number, accent: number, boundary: number) {
+export function sampleCompanionFace(performance: Performance, now: number, accent: number, boundary: number, speaking: boolean) {
   const {move, stance, state, style} = performance
   const weights: Record<string, number> = {}
-  if (state === 'RelationshipRepair' || state === 'SafetyBoundary') return weights
-  const [orientMax, careMax, focusMax, affiliateMax, smileMax] = ranges[state]
   const age = Math.max(0, now-performance.started)
   const intensity = clamp01(performance.intensity)
+  if (state === 'RelationshipRepair' || state === 'SafetyBoundary') {
+    // Unity uses its authored static state profiles for these two states.
+    // Keep its small brow/eye cue and leave oral A2F channels alone in speech.
+    const repair = state === 'RelationshipRepair'
+    const strength = intensity*smooth(age/.32)
+    weights.browInnerUp = strength*(repair ? .12 : .08)
+    for (const side of ['Left','Right']) {
+      if (repair) weights['eyeSquint'+side] = strength*.05
+      else weights['browDown'+side] = strength*.08
+      if (!speaking) weights['mouthPress'+side] = strength*(repair ? .04 : .08)
+    }
+    return weights
+  }
+  const [orientMax, careMax, focusMax, affiliateMax, smileMax] = ranges[state]
   const question = move === 'clarify'
   const reflection = move === 'reflect'
   const caring = stance === 'comfort'

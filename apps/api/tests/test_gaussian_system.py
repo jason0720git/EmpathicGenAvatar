@@ -108,12 +108,60 @@ def test_session_and_downloadable_logs_survive_restart_without_exposing_api_key(
             assert secret.encode() not in b"".join(archive.read(name) for name in archive.namelist())
             config = json.loads(archive.read("session.json"))
             assert config["avatar_id"] == avatar["id"]
-            assert config["controller"] == "rule_based_sobia_inspired_v1"
+            assert config["controller"] == gaussian_main.CONTROLLER
     # Retrieval after process restart must not create a second session event.
     old = (tmp_path / "sessions" / session["id"] / "events.jsonl").read_bytes()
     with TestClient(create_gaussian_app(tmp_path, api_key="")) as restarted:
         assert restarted.get(log_path).status_code == 200
     assert (tmp_path / "sessions" / session["id"] / "events.jsonl").read_bytes() == old
+
+
+def test_preview_isolated_and_recoverable_for_comparisons(tmp_path):
+    with TestClient(create_gaussian_app(tmp_path, api_key="")) as client:
+        avatar_id = import_avatar(client)["id"]
+        def create(mode):
+            return client.post("/gaussian-api/sessions", json={"avatar_id": avatar_id, "mode": mode}).json()["id"]
+
+        sid = create("preview")
+        endpoint = f"/gaussian-api/sessions/{sid}"
+        batch = {"events": [{"event": "motion.sample", "tracking_stage": "displayed",
+                             "settings": {"vitality": 1},
+                             "rendered_frame": {"head": {"pitch": 15}, "weights": {"eyeBlinkLeft": .8}},
+                             "headMotion": {"driver": "flame-neck-anchored-v1", "applied": {"pitch": 14.9},
+                                            "torsoDriftMm": 0}}, {"event": "policy.nod"}]}
+        assert client.post(endpoint + "/preview-events", json=batch).json() == {"saved": 2}
+        assert client.post(endpoint + "/preview-events", json={"events": batch["events"] + [{"bad": 1}]}).status_code == 422
+        assert client.post(endpoint + "/preview-events", json={"events": [{"event": "test", "text": "x"*30000}]}).status_code == 422
+        live = create("realtime")
+        assert client.post(f"/gaussian-api/sessions/{live}/preview-events", json=batch).status_code == 409
+        with pytest.raises(WebSocketDisconnect), client.websocket_connect(f"/gaussian-ws/{sid}"):
+            pass
+    with TestClient(create_gaussian_app(tmp_path, api_key="")) as restarted:
+        summary = restarted.get(endpoint + "/summary").json()
+        assert summary["mode"] == "preview"
+        assert summary["sample_stages"] == {"displayed": 1}
+        assert summary["sampled_ranges"]["renderer_pitch_deg"]["max"] == 14.9
+        assert summary["sampled_ranges"]["renderer_torso_drift_mm"]["max"] == 0
+        assert summary["policy_events"] == {"policy.nod": 1}
+        assert summary["settings_history"] == [{"vitality": 1}]
+        archive = restarted.get(endpoint + "/logs.zip")
+        with zipfile.ZipFile(io.BytesIO(archive.content)) as saved:
+            assert json.loads(saved.read("summary.json")) == summary
+
+
+def test_tool_semantics_survive_controller_and_nod_is_not_applied_twice():
+    from app.gaussian_behavior import BehaviorController
+
+    intent = BehaviorIntent(emotion="sad", intensity=.8, intent="supportive", move="repair",
+                            stance="comfort", confidence=.88, nod=True)
+    controller = BehaviorController()
+    plan = controller.from_affect(intent.emotion, intent.intensity, intent=intent.intent,
+                                  **intent.model_dump(include={"move", "stance", "confidence", "nod"}))
+    frame = controller.mix_frame({}, .81, plan, idle_motion=False, bake_nod=False)
+    assert frame["head"] == pytest.approx(plan.head)
+    assert frame["behavior"]["nod"] is True
+    assert frame["behavior"]["move"] == "repair" and frame["behavior"]["stance"] == "comfort"
+    assert frame["behavior"]["confidence"] == .88
 
 
 @pytest.mark.parametrize("name", ["../outside", "/outside", "C:/outside", "dir/../../outside", r"dir\..\..\outside"])

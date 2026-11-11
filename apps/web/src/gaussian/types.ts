@@ -1,3 +1,6 @@
+import type { CompanionMove, CompanionStance } from './companionFace'
+import type { PolicyDiagnostics } from './sobiaPolicy'
+
 export type SourceCamera = { version: string; position: number[]; target: number[]; up: number[]; fov: number; aspect: number }
 export type Avatar = {
   id: string; name: string; status: 'ready' | 'preparing' | 'error'; asset_url?: string;
@@ -14,9 +17,10 @@ export type Health = {
 export type MotionFrame = {
   turn_id: string; pts_ms: number; weights: Record<string, number>;
   raw_weights?: Record<string, number>;
-  behavior?: {emotion?:string;intensity?:number};
+  behavior?: {emotion?:string;intensity?:number;source?:string;intent?:string;move?:CompanionMove|null;
+    stance?:CompanionStance|null;confidence?:number|null;nod?:boolean;nod_start_seconds?:number};
   head?: { pitch: number; yaw: number; roll: number }; gaze?: { x: number; y: number };
-  source?: string; speech_energy?: number; natural_motion?: {speaking:boolean;energy:number;head_offset:{pitch:number;yaw:number;roll:number};blink:number;version?:string;gain?:number;emotion?:string;accent?:number;boundary?:number;accent_count?:number;face_envelopes?:Record<string,number>;raw_residual_peak?:number};
+  source?: string; speech_energy?: number; natural_motion?: {speaking:boolean;energy:number;head_offset:{pitch:number;yaw:number;roll:number};blink:number;version?:string;gain?:number;emotion?:string;accent?:number;boundary?:number;accent_count?:number;face_envelopes?:Record<string,number>;raw_residual_peak?:number;policy?:PolicyDiagnostics};
 }
 export type Controls = {
   emotion: string; intensity: number; gaze_x: number; gaze_y: number;

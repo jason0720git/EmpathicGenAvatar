@@ -6,7 +6,10 @@ const labels: Record<string, string> = {
   CompassionateComfort: '위로', GroundingSupport: '안정 지원', CollaborativeEmpowerment: '함께 해결',
   SharedPositive: '기쁨 공유', SafetyBoundary: '안전 대응', RelationshipRepair: '관계 회복',
   idle: '대기', down: '숙임', up: '복귀', gap: '동작 사이', manual: '수동',
-  spoken_receipt: '응답 시작', listening_pause: '경청 중 쉼', none: '없음',
+  spoken_receipt: '응답 시작', short_pause: '경청 중 쉼', speech_continuer: '경청 중 맞장구', llm_plan: '응답 계획',
+  Baseline:'기본 자세', ManualEmotion:'수동 감정', LowConfidence:'판단 보류', SharedSurprise:'놀람 공유',
+  acknowledge:'호응', answer:'답변', clarify:'확인 질문', reflect:'되짚기', repair:'관계 회복', protect:'안전 대응',
+  plain:'담담하게', comfort:'위로', steady:'차분하게', encourage:'격려', celebrate:'축하', surprise:'놀람', none:'없음',
 }
 const name = (value?: string | null) => value ? labels[value] ?? value : '—'
 const angles = (values?: number[]) => values ? values.map(v => v.toFixed(1) + '°').join(' / ') : '—'

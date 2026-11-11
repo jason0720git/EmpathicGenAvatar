@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .gaussian_a2f import A2FClient
 from .gaussian_behavior import BehaviorController
 from .gaussian_realtime import RealtimeVoice, BehaviorIntent
-from .gaussian_store import AvatarFiles, SessionLog, checked_id, utc_now, validate_asset_zip
+from .gaussian_store import AvatarFiles, SessionLog, checked_id, session_archive, utc_now, validate_asset_zip
 from .perception import PerceptionClient
 from .gaussian_review import summary as session_summary
 
@@ -269,13 +269,7 @@ def create_gaussian_app(root: Path | None = None, api_key: str | None = None) ->
             contents = await asyncio.to_thread(entry["log"].archive)
         else:
             # Opening an archive must not append a new session-created event.
-            import io, zipfile
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-                for path in (data / "sessions" / session_id).iterdir():
-                    if path.is_file():
-                        out.write(path, path.name)
-            contents = buffer.getvalue()
+            contents = await asyncio.to_thread(session_archive, data / "sessions" / session_id)
         return Response(contents, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="gaussian-{session_id}.zip"'})
 
     @app.post("/gaussian-api/sessions/{session_id}/feedback")
@@ -363,7 +357,8 @@ class GaussianRoom:
             count += 1
             if (not self.turn_task or self.turn_task.done()) and not self.awaiting_playback:
                 elapsed = time.monotonic() - (self.manual_start if self.manual else self.started)
-                mixed = self.controller.mix_frame({}, elapsed, self.active_plan(), speaking=False, bake_nod=False)
+                mixed = self.controller.mix_frame({}, elapsed, self.active_plan(), speaking=False,
+                                                  idle_motion=False, bake_nod=False)
                 packet = {"turn_id": "idle", "pts_ms": elapsed*1000, **mixed, "source": "behavior_controller"}
                 await self.emit("animation.frame", **packet)
                 self.trace("animation.idle", packet)
@@ -497,7 +492,8 @@ class GaussianRoom:
                 frames += 1
                 if first_motion is None:
                     first_motion = (time.monotonic()-started)*1000
-                mixed = self.controller.mix_frame(frame.coefficients, frame.time_seconds, self.active_plan(plan), bake_nod=False)
+                mixed = self.controller.mix_frame(frame.coefficients, frame.time_seconds, self.active_plan(plan),
+                                                  idle_motion=False, bake_nod=False)
                 packet = {"turn_id": turn_id, "pts_ms": frame.time_seconds*1000, "speech_energy": energy_windows[min(int(frame.time_seconds*50),len(energy_windows)-1)] if energy_windows else 0., **mixed, "source": "nvidia_a2f+behavior_controller"}
                 self.trace("animation.frame", packet)
                 await self.emit("animation.frame", **packet)

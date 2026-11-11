@@ -1,5 +1,7 @@
 import type { MotionFrame } from './types'
 import { CausalProsody } from './prosody'
+import { COMPANION_VERSION } from './companionFace'
+import { SobiaPolicy } from './sobiaPolicy'
 const clamp=(v:number,a=0,b=1)=>Math.max(a,Math.min(b,v))
 const smooth=(v:number)=>{v=clamp(v);return v*v*(3-2*v)}
 const noise=(t:number,seed:number)=>{
@@ -27,13 +29,35 @@ export class NaturalMotion {
   private accentStrength=0
   private gestureIndex=0
   private prosody=new CausalProsody()
+  private policy=new SobiaPolicy()
+  observeVoice(now:number,seconds:number,voiced:boolean) { this.policy.observeVoice(now,seconds,voiced) }
+  endListeningTurn() { this.policy.endListeningTurn() }
+  requestNod(now:number,cue:'manual'|'spoken_receipt') { return this.policy.requestNod(now,cue) }
+  drainPolicyEvents() { return this.policy.drainEvents() }
+  resetPolicy() {
+    this.policy=new SobiaPolicy()
+    this.prosody=new CausalProsody()
+    this.last=null; this.activation=0; this.accentAt=-10; this.accentStrength=0; this.gestureIndex=0
+    this.head={pitch:0,yaw:0,roll:0}; this.gaze={x:0,y:0}
+    this.affect={}; this.rawMean={}; this.rawTurn=''
+  }
   apply(frame:MotionFrame,now:number,speaking:boolean,enabled=true,vitality=1):MotionFrame {
-    if (!enabled || vitality<=0) {this.last=now;return frame}
+    if (!enabled || vitality<=0) {
+      this.last=now
+      const {diagnostics:policy}=this.policy.sample(frame,now,speaking,false,0,0)
+      if (policy.nod_cue !== 'manual') return frame
+      const base=frame.head??{pitch:0,yaw:0,roll:0}
+      return {...frame,head:{...base,pitch:clamp(base.pitch+policy.nod_pitch_deg,-25,25)},natural_motion:{
+        speaking,energy:frame.speech_energy??0,head_offset:{pitch:policy.nod_pitch_deg,yaw:0,roll:0},
+        blink:frame.weights.eyeBlinkLeft??0,version:COMPANION_VERSION,policy,
+      }}
+    }
     const dt=this.last===null?1/60:clamp(now-this.last,0,.05);this.last=now
     const gain=clamp(vitality,0,1.5)
     this.activation=follow(this.activation,Number(speaking),dt,.3)
     if(speaking && frame.turn_id!==this.rawTurn){this.rawTurn=frame.turn_id;this.rawMean={}}
     const p=this.prosody.update(frame.speech_energy??0,speaking,dt,frame.turn_id)
+    const {diagnostics:policy,weights:semanticWeights}=this.policy.sample(frame,now,speaking,true,p.accent,p.boundary)
     if(p.triggered){this.accentAt=now;this.accentStrength=p.accent;this.gestureIndex++}
     const phase=(now-this.accentAt)/.72
     const beat=phase>=0&&phase<1?Math.sin(Math.PI*phase)**2*this.accentStrength:0
@@ -106,6 +130,18 @@ export class NaturalMotion {
       const rounding=speaking?Math.max(weights.mouthFunnel??0,weights.mouthPucker??0):0
       weights['mouthSmile'+side]=(weights['mouthSmile'+side]??0)*(1-.75*smooth((rounding-.25)/.65))
     }
+    if (semanticWeights !== null) {
+      // Only the companion owns affect in auto. Remove the emotion preset,
+      // including opposing corners, before writing the coordinated trajectory.
+      for (const name of Object.keys(weights)) if (faceChannel.test(name)) weights[name]=0
+      Object.assign(weights,semanticWeights)
+      const rounding=speaking?Math.max(weights.mouthFunnel??0,weights.mouthPucker??0):0
+      for(const side of ['Left','Right']) {
+        const smile='mouthSmile'+side
+        weights[smile]=(weights[smile]??0)*(1-.75*smooth((rounding-.25)/.65))
+      }
+      rawResidualPeak=0
+    }
     const gaze={x:clamp((frame.gaze?.x??0)+this.gaze.x*gain,-1,1),y:clamp((frame.gaze?.y??0)+this.gaze.y*gain,-1,1)}
     weights.eyeLookInLeft=weights.eyeLookOutRight=Math.max(0,gaze.x)*.55
     weights.eyeLookOutLeft=weights.eyeLookInRight=Math.max(0,-gaze.x)*.55
@@ -113,9 +149,10 @@ export class NaturalMotion {
       weights['eyeLookUp'+side]=Math.max(0,gaze.y)*.55;weights['eyeLookDown'+side]=Math.max(0,-gaze.y)*.55
       weights['eyeBlink'+side]=blink;weights['eyeWide'+side]=(weights['eyeWide'+side]??0)*(1-blink)
     }
-    const head={pitch:clamp((frame.head?.pitch??0)+this.head.pitch,-10,10),yaw:clamp((frame.head?.yaw??0)+this.head.yaw,-12,12),roll:clamp((frame.head?.roll??0)+this.head.roll,-6,6)}
-    return {...frame,weights,head,gaze,source:frame.source+'+sobia_causal_dynamics_v8',natural_motion:{
-      speaking,energy:p.energy,head_offset:{...this.head},blink,version:'sobia-causal-v8',gain,emotion,
+    const basePitch=clamp((frame.head?.pitch??0)+this.head.pitch,-10,10)
+    const head={pitch:basePitch+policy.nod_pitch_deg,yaw:clamp((frame.head?.yaw??0)+this.head.yaw,-12,12),roll:clamp((frame.head?.roll??0)+this.head.roll,-6,6)}
+    return {...frame,weights,head,gaze,source:(frame.source??'gaussian')+'+sobia_companion_v9',natural_motion:{
+      speaking,energy:p.energy,head_offset:{...this.head,pitch:this.head.pitch+policy.nod_pitch_deg},blink,version:COMPANION_VERSION,gain,emotion,policy,
       accent:p.accent,boundary:p.boundary,accent_count:this.gestureIndex,face_envelopes:envelopes,raw_residual_peak:rawResidualPeak,
     }}
   }
