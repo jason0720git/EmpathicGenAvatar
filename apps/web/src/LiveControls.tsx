@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 
 type Target = {expression:string;intensity:number;head:{yaw_deg:number;pitch_deg:number;roll_deg:number};gaze:{x:number;y:number}}
 const initial:Target={expression:'neutral',intensity:.4,head:{yaw_deg:0,pitch_deg:0,roll_deg:0},gaze:{x:0,y:0}}
-export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebSocket|null;displayedPts:()=>number;baseline?:Target}) {
+type ControlTrace = (phase: string, details: Record<string, string | number>) => void
+export function LiveControls({socket,displayedPts,baseline=initial,onTrace}:{socket:WebSocket|null;displayedPts:()=>number;baseline?:Target;onTrace?:ControlTrace}) {
   const [target,setTarget]=useState<Target>(initial)
   const [status,setStatus]=useState('발화가 시작되면 조절할 수 있습니다.')
   const [connected,setConnected]=useState(false)
   const seq=useRef(0), pending=useRef<{seq:number;pts:number}|null>(null)
   const readPts=useRef(displayedPts); readPts.current=displayedPts
+  const trace=useRef(onTrace); trace.current=onTrace
   const base=useRef(baseline);base.current={expression:baseline.expression,intensity:baseline.intensity,head:{...baseline.head},gaze:{x:baseline.gaze.x,y:baseline.gaze.y}}
   useEffect(()=>{
     seq.current=0;pending.current=null;setTarget(base.current)
@@ -18,6 +20,13 @@ export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebS
       if(typeof event.data!=='string')return
       try {
         const data=JSON.parse(event.data)
+        if(data.type==='control.received'||data.type==='control.applied'||data.type==='control.error'){
+          const detail: Record<string, string | number> = {seq: data.seq ?? 0}
+          if (typeof data.pts_ms === 'number') detail.pts_ms = data.pts_ms
+          if (data.head_deg) Object.assign(detail, data.head_deg)
+          if (typeof data.detail === 'string') detail.error = data.detail
+          trace.current?.(data.type, detail)
+        }
         if(data.type==='control.error'&&data.seq===undefined){
           pending.current=null;setConnected(false);setStatus(`실시간 제어 종료: ${data.detail}`);return
         }
@@ -33,7 +42,11 @@ export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebS
     const close=()=>{setConnected(false);if(!pending.current)setStatus('생성 종료 · 이미 생성된 프레임은 변경할 수 없습니다.')}
     socket.addEventListener('message',receive);socket.addEventListener('close',close)
     const timer=window.setInterval(()=>{
-      if(pending.current&&readPts.current()>=pending.current.pts){setStatus(`명령 ${pending.current.seq} 화면 반영 · ${pending.current.pts}ms부터 부드럽게 전환`);pending.current=null}
+      if(pending.current&&readPts.current()>=pending.current.pts){
+        trace.current?.('displayed', {seq: pending.current.seq, pts_ms: pending.current.pts, display_pts_ms: readPts.current()})
+        setStatus(`명령 ${pending.current.seq} 화면 반영 · ${pending.current.pts}ms부터 부드럽게 전환`)
+        pending.current=null
+      }
     },80)
     return()=>{clearInterval(timer);socket.removeEventListener('message',receive);socket.removeEventListener('close',close)}
   },[socket])
@@ -44,6 +57,8 @@ export function LiveControls({socket,displayedPts,baseline=initial}:{socket:WebS
     const id=++seq.current
     const changed=Object.fromEntries(Object.entries(next).filter(([key,value])=>JSON.stringify(value)!==JSON.stringify(target[key as keyof Target])))
     socket.send(JSON.stringify(reset?{type:'control.reset',seq:id}:{type:'control',seq:id,...changed}))
+    trace.current?.(reset?'reset':'requested', {seq:id, expression:next.expression, intensity:next.intensity,
+      ...next.head, gaze_x:next.gaze.x, gaze_y:next.gaze.y, channels:Object.keys(changed).join(',')})
     setStatus(`명령 ${id} 전송`)
   }
   return <details className="live-controls"><summary>발화 중 얼굴·머리·시선 제어</summary>

@@ -24,6 +24,30 @@ it('limits the flow derivative to avoid mesh folding',()=>{
     expect((Math.abs(f[k+2]-f[k])+Math.abs(f[k+GRID_W*2]-f[k]))/8).toBeLessThan(.601)
   }
 })
+it('keeps Seoyeon’s face registered without moving the neckline, shoulder seams or side background',()=>{
+  const a=new Float32Array(W*H),b=new Float32Array(W*H)
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++)
+    a[y*W+x]=110+40*Math.sin(x*.4)+30*Math.sin(y*.53)+20*Math.sin(x*.31+y*.2)
+  for(let y=3;y<H;y++)for(let x=2;x<W;x++)b[y*W+x]=a[(y-3)*W+x-2]
+  const forward=matchGeometry(a,b,'demo-seoyeon').xy
+  const reverse=matchGeometry(b,a,'demo-seoyeon').xy
+  const changing=smoothFlow(reverse.slice(),forward)
+  const component=(field:Float32Array,x:number,y:number,axis:number)=>field[(y*GRID_W+x)*2+axis]
+  expect(component(forward,8,8,0)).toBeCloseTo(2,0)
+  expect(component(forward,8,8,1)).toBeCloseTo(3,0)
+  expect(component(reverse,8,8,1)).toBeLessThan(-2)
+  // Whole grid cells in these regions must be motionless, including while
+  // changing source/target pose across frames. Linear interpolation of zero
+  // vertices cannot propagate the face alignment into the measured regions.
+  for(const field of [forward, reverse, changing]){
+    for(let y=0;y<GRID_H;y++)for(let x=0;x<GRID_W;x++){
+      if(y>=13 || x<=3 || x>=13){
+        expect(Math.abs(component(field,x,y,0))+Math.abs(component(field,x,y,1))).toBeLessThan(1e-7)
+      }
+    }
+  }
+  expect(component(matchGeometry(a,b,'other-avatar').xy,8,16,1)).toBeGreaterThan(2)
+})
 it('preserves exact input endpoints and does not change canvas opacity',()=>{
   const h=new GeometryHandoff(),a={} as HTMLCanvasElement,b={} as HTMLCanvasElement
   const ctx={canvas:{width:100,height:120},drawImage:vi.fn(),globalAlpha:1}

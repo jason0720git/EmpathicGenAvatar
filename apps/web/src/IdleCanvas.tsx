@@ -33,14 +33,34 @@ export class MjpegParser {
   }
 }
 
-export function IdleCanvas({ source, canvasRef, className, label, onReady, parked=false, onComplete }: {
+export type CueProgress = (phase: 'painted' | 'completed' | 'failed' | 'cancelled', frames: number) => void
+
+export function IdleCanvas({ source, avatarId, canvasRef, className, label, onReady, parked=false, onComplete, onCueProgress, expectedFrames }: {
   source: string; canvasRef: RefObject<HTMLCanvasElement | null>; className: string
   label: string; onReady: (ready: boolean) => void; parked?: boolean
+  avatarId?: string
   onComplete?: () => void
+  onCueProgress?: CueProgress
+  expectedFrames?: number
 }) {
-  const completeRef=useRef(onComplete)
-  completeRef.current=onComplete
+  const callbacks = useRef({onComplete, onCueProgress})
+  callbacks.current = {onComplete, onCueProgress}
   useEffect(() => {
+    // Bind these callbacks to this stream, including on cancellation.
+    const {onComplete: complete, onCueProgress: progress} = callbacks.current
+    let paintedFrames = 0
+    let receivedFrames = 0
+    let finished = false
+    const finish = (phase: 'completed' | 'failed' | 'cancelled') => {
+      if (finished) return
+      finished = true
+      progress?.(phase, paintedFrames)
+      if (phase !== 'cancelled') complete?.()
+    }
+    const finishStream = () => {
+      const completeBody = expectedFrames === undefined || receivedFrames === expectedFrames
+      finish(paintedFrames > 0 && completeBody ? 'completed' : 'failed')
+    }
     const controller = new AbortController()
     let pending: ImageBitmap | null = null
     let paintId = 0
@@ -49,7 +69,7 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
     const previous = canvasRef.current
     let transition = previous?.dataset.painted
       ? beginTransition(previous,previous,previous.width,previous.height,0,false) : null
-    if (transition) { transition.geometry=new GeometryHandoff(); transition.mixMs=320 }
+    if (transition) { transition.geometry=new GeometryHandoff(avatarId); transition.mixMs=320 }
     let transitionStarted = false
     // Retain the painted image while reconnecting. During speech fetch only
     // frame zero (the shared source-pose anchor), not an arbitrary idle phase.
@@ -64,17 +84,20 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
           canvas.width = bitmap.width; canvas.height = bitmap.height
         }
         const ctx = canvas.getContext('2d')
-        if (ctx && transition) {
+        if (!ctx) { bitmap.close(); finish('failed'); return }
+        if (transition) {
           if (!transitionStarted) { transition.started=performance.now(); transitionStarted=true }
           drawTransition(ctx,bitmap,transition,performance.now())
           if (performance.now()-transition.started>=320) transition=null
-        } else ctx?.drawImage(bitmap, 0, 0)
+        } else ctx.drawImage(bitmap, 0, 0)
+        paintedFrames++
+        if (paintedFrames === 1) progress?.('painted', paintedFrames)
         canvas.dataset.painted = 'true'
         canvas.dataset.parked = String(parked)
         if (!ready) { ready = true; onReady(true) }
       }
       bitmap.close()
-      if(ended) completeRef.current?.()
+      if (ended) finishStream()
     }
     const run = async () => {
       const response = await fetch(source, { signal: controller.signal })
@@ -85,11 +108,16 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
         while (!controller.signal.aborted) {
           const { value, done } = await reader.read()
           if (done) {
-            if(completeRef.current){ended=true;if(!pending)completeRef.current();break}
+            if (complete) {
+              ended = true
+              if (!pending) finishStream()
+              break
+            }
             throw new Error('Idle stream ended')
           }
           const frames = parser.push(value)
           if (!frames.length) continue
+          receivedFrames += frames.length
           // Decode serially and retain only the newest frame after a network
           // burst. Never replay a backlog as a fast head movement.
           const bitmap = await createImageBitmap(new Blob([frames[parked ? 0 : frames.length-1] as BlobPart], { type: 'image/jpeg' }))
@@ -107,10 +135,10 @@ export function IdleCanvas({ source, canvasRef, className, label, onReady, parke
       // source portrait. The next preparation revision reconnects the stream.
       if (!controller.signal.aborted) {
         if(!ready) onReady(false)
-        completeRef.current?.()
+        finish('failed')
       }
     })
-    return () => { controller.abort(); cancelAnimationFrame(paintId); pending?.close() }
-  }, [source, canvasRef, onReady, parked])
+    return () => { controller.abort(); cancelAnimationFrame(paintId); pending?.close(); finish('cancelled') }
+  }, [source, avatarId, canvasRef, onReady, parked, expectedFrames])
   return <canvas ref={canvasRef} className={className} aria-label={label} data-source={source} />
 }

@@ -60,10 +60,10 @@ function sample(source: CanvasImageSource) {
   return gray
 }
 export type AvatarTransition = {from:HTMLCanvasElement; dx:number; dy:number; angle?:number; scale?:number; started:number; accepted:boolean; improvement:number; mixMs?:number; faceLocal?:boolean; geometry?:GeometryHandoff}
-export function beginIdleEntryTransition(idle:HTMLCanvasElement,mediaStartMs:number,_incoming?:CanvasImageSource):AvatarTransition {
+export function beginIdleEntryTransition(idle:HTMLCanvasElement,mediaStartMs:number,_incoming?:CanvasImageSource,avatarId?:string):AvatarTransition {
   // Keep live idle and estimate LOCAL geometry anew for each pair, not one
   // global translation from an increasingly stale initial screenshot.
-  return {from:idle,dx:0,dy:0,accepted:false,improvement:0,angle:0,scale:1,started:mediaStartMs,mixMs:ENTRY_MIX_MS,faceLocal:true,geometry:new GeometryHandoff()}
+  return {from:idle,dx:0,dy:0,accepted:false,improvement:0,angle:0,scale:1,started:mediaStartMs,mixMs:ENTRY_MIX_MS,faceLocal:true,geometry:new GeometryHandoff(avatarId)}
 }
 export function beginTransition(from:CanvasImageSource,to:CanvasImageSource,w:number,h:number,now:number,register=true):AvatarTransition|null {
   try {

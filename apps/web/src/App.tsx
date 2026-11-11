@@ -4,7 +4,7 @@ import { GeometryHandoff, warmGeometryHandoff } from './geometryHandoff'
 import { PerceptionPanel, type PerceptionHandle } from './PerceptionPanel'
 import { IdleCanvas } from './IdleCanvas'
 import { LiveControls } from './LiveControls'
-import { ListeningPolicy, type ListeningCue } from './listeningPolicy'
+import { ListeningPolicy, LISTENING_POLICY_VERSION, cueLabels, cueVariants, type ListeningCue, type ListeningDecision } from './listeningPolicy'
 import { TurnDiagnostics } from './TurnDiagnostics'
 import './rendered-video.css'
 import './test-studio.css'
@@ -554,11 +554,56 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }
   const [idleVariant, setIdleVariant] = useState(() => Math.floor(Math.random() * 2))
   const [listeningPreview, setListeningPreview] = useState(false)
-  const [listeningCue, setListeningCue] = useState<{kind:ListeningCue;id:number}|null>(null)
+  type Cue = {kind: ListeningCue; id: string; runId: string; trigger: string; requestedAt: number; voiced_ms: number; pause_ms: number}
+  const [listeningCue, setListeningCue] = useState<Cue | null>(null)
+  const cueRef = useRef<Cue | null>(null)
+  const captureRef = useRef<{id: string; started: number} | null>(null)
+  const [cueStatus, setCueStatus] = useState('')
+  const [idlePolicy, setIdlePolicy] = useState<Awaited<ReturnType<typeof api.prepareIdle>>['motion_policy']>(null)
+  const idlePolicyRef = useRef(idlePolicy)
+  idlePolicyRef.current = idlePolicy
+  function logMotion(runId: string, event: string, elapsedMs: number, details: Record<string, string | number | boolean>) {
+    if (apiOnline && sessionId) void api.telemetry({
+      turn_id: runId, session_id: sessionId, avatar_id: avatar.id, policy_version: LISTENING_POLICY_VERSION,
+      event, elapsed_ms: Math.min(300000, Math.max(0, Math.round(elapsedMs))),
+      details: {...details, renderer: method, mode, client_ms: Math.round(performance.now()), cache_revision: idlePolicyRef.current?.cache_revision ?? 0,
+        source_sha256: idlePolicyRef.current?.variants[0]?.source_sha256 ?? ''},
+    })
+  }
+  function traceCue(cue: Cue, phase: string, frames = 0) {
+    const clip = idlePolicyRef.current?.variants.find(variant => variant.variant === cueVariants[cue.kind])
+    logMotion(cue.runId, 'motion_cue', performance.now() - cue.requestedAt, {
+      cue_id: cue.id, variant: cueVariants[cue.kind], kind: cue.kind, trigger: cue.trigger,
+      phase, painted_frames: frames, voiced_ms: cue.voiced_ms, pause_ms: cue.pause_ms,
+      ...(clip ? {clip_frames: clip.frames, cycles: clip.cycles, requested_peak_deg: clip.nods[0]?.peak_pitch_delta_deg ?? 0} : {}),
+    })
+  }
+  function requestCue(kind: ListeningCue, decision?: ListeningDecision) {
+    const id = crypto.randomUUID()
+    const cue: Cue = {kind, id, runId: captureRef.current?.id ?? `preview-${id}`, requestedAt: performance.now(),
+      trigger: decision?.trigger ?? 'preview', voiced_ms: decision?.voiced_ms ?? 0, pause_ms: decision?.pause_ms ?? 0}
+    if (decision?.gate === 'head_busy' || cueRef.current) { traceCue(cue, 'head_busy'); return }
+    cueRef.current = cue
+    setListeningCue(cue)
+    setCueStatus(`${cueLabels[kind]} · 영상 대기`)
+    traceCue(cue, 'requested')
+  }
+  function finishCue(cue: Cue) {
+    if (cueRef.current?.id === cue.id) { cueRef.current = null; setListeningCue(null) }
+  }
   const listeningPolicyRef=useRef(new ListeningPolicy())
   const listeningActiveRef=useRef(false)
   useEffect(()=>{
-    if(state!=='listening'){listeningActiveRef.current=false;listeningPolicyRef.current.reset();setListeningCue(null)}
+    if(state!=='listening'){
+      listeningActiveRef.current=false
+      listeningPolicyRef.current.reset()
+      if (captureRef.current) {
+        logMotion(captureRef.current.id, 'listening_ended', performance.now() - captureRef.current.started, {submit: false})
+        captureRef.current = null
+      }
+      cueRef.current=null
+      setListeningCue(null)
+    }
   },[state])
   const [gazeTest, setGazeTest] = useState<'default' | 'center' | 'left' | 'right' | 'avert_return'>('default')
   // Keep the selected idle stream stable throughout thinking and speech.
@@ -629,10 +674,16 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   useEffect(() => {
     let cancelled = false
     setIdleAvailable(false)
+    setIdlePolicy(null)
+    setCueStatus('')
+    listeningPolicyRef.current = new ListeningPolicy()
     setIdleVariant(Math.floor(Math.random() * 2))
     if (!apiOnline) return () => { cancelled = true }
-    void api.prepareIdle(avatar.id).then(() => {
-      if (!cancelled) setIdleRevision((value) => value + 1)
+    void api.prepareIdle(avatar.id).then(result => {
+      if (!cancelled) {
+        setIdlePolicy(result.motion_policy ?? null)
+        setIdleRevision((value) => value + 1)
+      }
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [avatar.id, apiOnline])
@@ -712,14 +763,14 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     let exitStarted = false
     let exitCompleted = false
     let exitStartPts: number | null = null
-    const exitGeometry = new GeometryHandoff()
+    const exitGeometry = new GeometryHandoff(avatar.id)
     let lastPresentedPts = -1
     let lastFeedbackPts = -160
     const isCurrent = () => mountedRef.current && realtimeAudioRef.current === context
     let peakAudioDelayMs = 0
     const elapsed = () => Math.max(0, Math.round(performance.now() - turnStartedAt))
     const telemetry = (event: string, details: Record<string, number | string | boolean> = {}) => {
-      if (apiOnline) void api.telemetry({ turn_id: turnId, event, elapsed_ms: elapsed(), details })
+      logMotion(turnId, event, elapsed(), details)
     }
     const drawAt = (ptsMs: number, bitmap: ImageBitmap) => {
       if (mediaStart === null) {
@@ -750,7 +801,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
           }
           if (!firstFramePresented && idleAvailable && idleImageRef.current) {
             entryTransition = method === 'ditto_realtime_trt10'
-              ? beginIdleEntryTransition(idleImageRef.current,startAt*1000,bitmap)
+              ? beginIdleEntryTransition(idleImageRef.current,startAt*1000,bitmap,avatar.id)
               : beginTransition(idleImageRef.current,bitmap,canvas.width,canvas.height,context.currentTime*1000,false)
             telemetry('visual_transition', {direction:'idle_to_speech', strategy:'continuous_geometry_v14', duration_ms:entryTransition?.mixMs ?? 160, full_frame_transform:false, live_idle:method === 'ditto_realtime_trt10', source_anchor:false, aligned_texture_blend:method === 'ditto_realtime_trt10'})
           }
@@ -922,7 +973,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
             // Late end markers use the last displayed composite, never the
             // source photograph. Normally the live tail already completed.
             const exitTransition = !exitCompleted && canvas && idleAvailable && idle ? beginTransition(canvas,idle,canvas.width,canvas.height,performance.now(),false) : null
-            if(exitTransition && method === 'ditto_realtime_trt10') {exitTransition.geometry=new GeometryHandoff();exitTransition.mixMs=TRANSITION_MS}
+            if(exitTransition && method === 'ditto_realtime_trt10') {exitTransition.geometry=new GeometryHandoff(avatar.id);exitTransition.mixMs=TRANSITION_MS}
             if(exitStarted) telemetry('visual_transition', {phase:'geometry_metrics',direction:'speech_to_idle',...exitGeometry.stats,aligned_texture_blend:true})
             telemetry('visual_transition', {direction:'speech_to_idle', phase:'completed', strategy:'continuous_geometry_v14', duration_ms:exitTransition ? TRANSITION_MS : 0, live_tail_completed:exitCompleted, fallback:!!exitTransition, source_anchor:false})
             const handoff = () => {
@@ -959,10 +1010,15 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }
 
   const stopListening = ({ submitOnEnd = false }: { submitOnEnd?: boolean } = {}) => {
+    if (captureRef.current) {
+      logMotion(captureRef.current.id, 'listening_ended', performance.now() - captureRef.current.started, {submit: submitOnEnd})
+      captureRef.current = null
+    }
     if (!submitOnEnd) voiceEpochRef.current += 1
     listeningActiveRef.current=false
     listeningPolicyRef.current.reset()
     setListeningCue(null)
+    cueRef.current=null
     perceptionRef.current?.endSpeech()
     submitVoiceOnEndRef.current = submitOnEnd && Boolean(voiceTextRef.current.trim())
     recognitionRef.current?.stop()
@@ -995,16 +1051,16 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     }
   }
 
-  const submitTurn = async (rawText: string) => {
+  const submitTurn = async (rawText: string, microphoneTurnId?: string) => {
     const text = rawText.trim()
     if (!text || !sessionId) return
     if (wavPreviewRef.current && !wavPreviewRef.current.paused) wavPreviewRef.current.pause()
     stopListening()
     setDraft('')
-    const turnId = `user-${Date.now()}`
+    const turnId = microphoneTurnId ?? `user-${Date.now()}`
     setTraceTurn(turnId);setTraceError('')
     const turnStartedAt = performance.now()
-    if (apiOnline) void api.telemetry({ turn_id: turnId, event: 'turn_submitted', elapsed_ms: 0 })
+    logMotion(turnId, 'turn_submitted', 0, {input: microphoneTurnId ? 'microphone' : wavTest ? 'wav' : 'text'})
     // `turnId` is also the server-side assistant response id. Keep the local
     // user bubble distinct so streamed assistant-caption updates cannot
     // overwrite what the user said.
@@ -1016,7 +1072,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       const affectOverride: AffectIntent | undefined = affectMode === 'auto'
         ? undefined
         : { emotion: affectMode, intensity: affectIntensity }
-      if (apiOnline) void api.telemetry({turn_id: turnId, event: 'render_requested', elapsed_ms: 0, details: {mode: expressionRenderMode, emotion: affectMode, intensity: affectIntensity}})
+      logMotion(turnId, 'render_requested', 0, {expression_mode: expressionRenderMode, emotion: affectMode, intensity: affectIntensity})
       const result = apiOnline ? await api.sendTurn(sessionId, text, affectOverride, turnId, expressionRenderMode, perceptionRef.current?.turnOptions(), gazeTest === 'default' ? undefined : {
         mode: 'pupil', pattern: gazeTest === 'avert_return' ? 'avert_return' : 'hold',
         x: gazeTest === 'left' ? -.65 : gazeTest === 'right' || gazeTest === 'avert_return' ? .65 : 0,
@@ -1028,7 +1084,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       liveMotionRef.current=applied
       setDiagnosticTurns(items => [...items, {id: result.turn_id, label: `${applied?.expression ?? affectMode} / ${applied?.expression_render_mode ?? expressionRenderMode} / ${Math.round((applied?.intensity ?? affectIntensity)*100)}% · ${result.turn_id}`}].slice(-50))
       setFeedbackTurn(result.turn_id); setFeedbackStatus(''); setFeedbackSecond(''); setFeedbackNote('')
-      if (apiOnline) void api.telemetry({ turn_id: result.turn_id, event: 'turn_response', elapsed_ms: Math.round(performance.now() - turnStartedAt) })
+      logMotion(result.turn_id, 'turn_response', performance.now() - turnStartedAt, {})
       setCaptions((items) => [...items, { id: result.turn_id, role: 'assistant', text: result.assistant_text, at: new Date() }])
       if (apiOnline && !wavTest) void syncAssistantCaption(sessionId, result.turn_id)
       setState('speaking')
@@ -1063,6 +1119,12 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     if (state === 'thinking' || !sessionId || recognitionRef.current) return
     const voiceEpoch = ++voiceEpochRef.current
     const currentVoice = () => mountedRef.current && voiceEpochRef.current === voiceEpoch
+    const capture = {id: `user-${crypto.randomUUID()}`, started: performance.now()}
+    captureRef.current = capture
+    logMotion(capture.id, 'listening_started', 0, {input: voiceTurnMode})
+    cueRef.current = null
+    setListeningCue(null)
+    setCueStatus('')
     perceptionRef.current?.beginSpeech()
     setState('listening')
     listeningPolicyRef.current.reset()
@@ -1077,8 +1139,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
       await beginMedia(mediaRef, setAudioLevel, (rms) => {
         if (!currentVoice()) return
         if(listeningActiveRef.current && recognitionRef.current){
-          const cue=listeningPolicyRef.current.observe(performance.now()/1000,rms)
-          if(cue)setListeningCue({kind:cue,id:Date.now()})
+          const decision=listeningPolicyRef.current.observe(performance.now()/1000,rms,Boolean(cueRef.current))
+          if(decision) requestCue(decision.kind, decision)
         }
         if (voiceTurnMode !== 'protected_auto_turn' || !recognitionRef.current) return
         const now = performance.now()
@@ -1143,7 +1205,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         mediaRef.current = null
         recognitionRef.current = null
         if (submit && text) {
-          void submitTurn(text)
+          void submitTurn(text, capture.id)
           return
         }
         setState('ready')
@@ -1162,6 +1224,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
   }
 
   const interrupt = async () => {
+    if (traceTurn && realtimeActive) logMotion(traceTurn, 'playback_interrupted', Math.max(0, displayedPtsRef.current), {display_pts_ms: displayedPtsRef.current})
     window.speechSynthesis?.cancel()
     stopListening()
     // Snapshot the displayed composite before cancelling audio/network. Keep
@@ -1173,7 +1236,7 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
     stopRealtime()
     const visualEpoch = visualEpochRef.current
     if (transition && ctx && idle) {
-      transition.geometry = new GeometryHandoff()
+      transition.geometry = new GeometryHandoff(avatar.id)
       transition.mixMs = 320
       setRealtimeActive(true)
       setStreamReady(true)
@@ -1221,7 +1284,17 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         <div className="video-canvas">
           <div className="stage-glow" />
           <AvatarPortrait avatar={avatar} mode={isSpeaking ? 'talking' : state === 'listening' ? 'listening' : 'idle'} level={audioLevel} large />
-          <IdleCanvas canvasRef={idleImageRef} className={`idle-avatar-video ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`} source={listeningCue ? `${idleUrl(avatar.id,listeningCue.kind==='nod'?3:4,idleRevision)}&cue=${listeningCue.id}` : idleUrl(avatar.id, idleVariant, idleRevision)} onComplete={listeningCue ? () => setListeningCue(null) : undefined} onReady={setIdleAvailable} label={`${avatar.name} 대기 아바타 영상`} />
+          <IdleCanvas avatarId={avatar.id} canvasRef={idleImageRef} className={`idle-avatar-video ${renderedAvatarVisible ? 'hidden' : ''} ${idleAvailable ? 'ready' : ''}`}
+            source={listeningCue ? `${idleUrl(avatar.id, cueVariants[listeningCue.kind], idleRevision)}&cue=${listeningCue.id}` : idleUrl(avatar.id, idleVariant, idleRevision)}
+            expectedFrames={listeningCue ? idlePolicy?.variants.find(clip => clip.variant === cueVariants[listeningCue.kind])?.frames : undefined}
+            onCueProgress={listeningCue ? (phase, frames) => {
+              traceCue(listeningCue, phase, frames)
+              if (cueRef.current?.id === listeningCue.id || !cueRef.current) {
+                const label = {painted:'재생 중', completed:'재생 완료', failed:'영상을 불러오지 못했습니다', cancelled:'중단'}[phase]
+                setCueStatus(`${cueLabels[listeningCue.kind]} · ${label}`)
+              }
+            } : undefined}
+            onComplete={listeningCue ? () => finishCue(listeningCue) : undefined} onReady={setIdleAvailable} label={`${avatar.name} 대기 아바타 영상`} />
           {realtimeActive ? <canvas ref={realtimeCanvasRef} className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} aria-label={`${avatar.name} 실시간 아바타 영상`} /> : renderedVideo && (renderedVideo.includes('/live-media/') ? <img className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} alt={`${avatar.name} 실시간 아바타 영상`} onLoad={() => setStreamReady(true)} onError={() => { setRenderedVideo(undefined); setStreamReady(true) }} /> : <video className={`rendered-avatar-video ${renderedAvatarVisible ? 'visible' : ''}`} src={renderedVideo} autoPlay playsInline onEnded={() => { setRenderedVideo(undefined); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedVideo(undefined); setState('ready') }} />)}
           {renderedAudio && <audio ref={renderedAudioRef} src={renderedAudio} preload="auto" onEnded={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} onError={() => { setRenderedAudio(undefined); setRenderedVideo(undefined); setStreamReady(false); setAudioLevel(0.13); setState('ready') }} />}
           <div className="ai-watermark"><Sparkles size={13} /> AI AVATAR</div>
@@ -1229,7 +1302,8 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
         </div>
         <div className="affect-control" aria-label="표정 테스트 제어">
           <div className="affect-control-head"><span>감정 · 강도</span><small>{wavTest ? (affectMode === 'auto' ? '얼굴 관측 → 표정 · 진단 강도 65% · API 토큰 없음' : '고정 WAV · API 토큰 사용 없음') : affectMode === 'auto' ? 'Auto' : 'Manual'}</small></div>
-          {method==='ditto_realtime_trt10'&&<LiveControls socket={realtimeActive?realtimeSocketRef.current:null} displayedPts={()=>displayedPtsRef.current} baseline={liveMotionRef.current}/>}
+          {method==='ditto_realtime_trt10'&&<LiveControls socket={realtimeActive?realtimeSocketRef.current:null} displayedPts={()=>displayedPtsRef.current} baseline={liveMotionRef.current}
+            onTrace={(phase, details) => logMotion(traceTurn, 'live_control', Math.max(0, displayedPtsRef.current), {phase, ...details})}/>}
           <div className="nonverbal-controls">
             <label>발화 시선 <select aria-label="발화 시선" value={gazeTest} disabled={state !== 'ready'} onChange={event => setGazeTest(event.target.value as typeof gazeTest)}>
               <option value="default">기존 자동</option><option value="center">정면 유지</option>
@@ -1237,8 +1311,19 @@ export function LiveRoom({ avatar, method, sessionInstruction, apiOnline, onExit
               <option value="avert_return">잠깐 이탈 후 복귀</option>
             </select></label>
             <button type="button" aria-pressed={listeningPreview} disabled={state !== 'ready'} onClick={() => setListeningPreview(value => !value)}>{listeningPreview ? '경청 미리보기 종료' : '경청 미리보기'}</button>
-            <small>{listeningPreview ? '16초 반복 · 2.4초/10.2초 끄덕임 · 5초 시선 이탈, 6.4초 복귀' : '시선 선택은 다음 발화부터 적용 · 마이크 청취 시 경청 동작'}</small>
+            <small>{listeningPreview ? '끄덕임과 시선 복귀를 반복 재생 중' : '시선 선택은 다음 발화에 적용됩니다.'}</small>
           </div>
+          {method === 'ditto_realtime_trt10' && <section className="head-cue-panel" aria-label="경청 동작">
+            <div><strong>경청 동작</strong>{state === 'listening' && <span>마이크 연동 중</span>}</div>
+            <p>짧은 쉼에는 한 번, 발화가 이어지면 두 번과 한 번을 번갈아 끄덕입니다.</p>
+            <div>{(['nod','double_nod'] as const).map(kind => <button key={kind} type="button"
+              aria-label={`${cueLabels[kind]} 재생`} disabled={state !== 'ready' || !idleAvailable || !!listeningCue}
+              onClick={() => requestCue(kind)}>{cueLabels[kind]} 재생</button>)}</div>
+            <small role="status" aria-label="경청 동작 재생 상태">{cueStatus || (idleAvailable ? '재생 준비됨' : '경청 영상 준비 중')}</small>
+            {liveMotionRef.current && <p>최근 응답 표정 · {liveMotionRef.current.expression} {Math.round(liveMotionRef.current.intensity * 100)}%
+              {liveMotionRef.current.temporal_policy === 'sobia' && liveMotionRef.current.expression_render_mode === 'speech_safe'
+                ? ' · 음성 강세와 쉼에 따라 눈썹·눈꺼풀·볼의 변화량 조절' : ' · 선택한 합성 설정 적용'}</p>}
+          </section>}
           <details><summary>고급 합성 설정</summary>
           <div className="affect-buttons" role="group" aria-label="표정 합성 비교 모드">
             {([['speech_safe','발음 보호 (기본)'],['off','표정 없음'],['native','감정 조건만'],['legacy','기존 증폭 (비교용)']] as const).map(([mode,label]) => <button type="button" key={mode} className={expressionRenderMode === mode ? 'selected' : ''} onClick={() => setExpressionRenderMode(mode)}>{label}</button>)}

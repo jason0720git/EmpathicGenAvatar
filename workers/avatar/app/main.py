@@ -27,7 +27,9 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from .companion_expression import COMPANION_EXPRESSION_POLICY, SOBIA_REFERENCE_COMMIT, CompanionExpression
 from .live_controls import LiveControlState
+from .listening_motion import LISTENING_NODS, idle_variant_policy, registered_head_mask
 
 
 class PrepareIn(BaseModel):
@@ -40,7 +42,7 @@ class PrepareIn(BaseModel):
 class IdleIn(PrepareIn):
     """One-shot full-frame idle-loop preparation for an approved avatar."""
 
-    variants: int = Field(default=5, ge=1, le=5)
+    variants: int = Field(default=6, ge=1, le=6)
 
 
 class RenderIn(BaseModel):
@@ -196,23 +198,20 @@ class BlinkAwareMotionStitch:
         self.boundary_timeline = None
         self.boundary_preroll = 0
         self.speech_timeline = None
-        self.speech_gain = 0.0
+        self.speech_performance = None
         self.last_speech_pupil = None
         self.live_controls = None
         self.live_preroll = 0
         self.live_timeline = None
-        self.speech_start_frame = None
-        self.speech_expression = 'neutral'
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
 
     def setup(self, *args, **kwargs):
         self.boundary_timeline = None
         self.speech_timeline = None
-        self.speech_gain = 0.0
+        self.speech_performance = None
         self.last_speech_pupil = None
         self.live_controls = None
         self.live_timeline = None
-        self.speech_start_frame = None
         self.protection_stats = {"frames": 0, "peak_removed_lip_delta": 0.0}
         return self.inner.setup(*args, **kwargs)
 
@@ -220,10 +219,11 @@ class BlinkAwareMotionStitch:
         self.boundary_timeline = timeline
         self.boundary_preroll = preroll
 
-    def set_speech_timeline(self, timeline, preroll, expression='neutral'):
+    def set_speech_timeline(self, timeline, preroll, expression='neutral', *,
+                            intensity=.35, turn_key='', shape_expression=True):
         self.speech_timeline = timeline
         self.speech_preroll = preroll
-        self.speech_expression = expression
+        self.speech_performance = CompanionExpression(expression, intensity, turn_key) if shape_expression else None
 
     def set_live_controls(self, controls, preroll, timeline=None):
         self.live_controls = controls
@@ -237,22 +237,11 @@ class BlinkAwareMotionStitch:
         if self.speech_timeline is not None and "delta_exp" in kwargs:
             frame = self.inner.idx - self.speech_preroll
             rms = self.speech_timeline.frame_rms(frame)
-            energy = float(np.clip((20*np.log10(max(rms or 0, 1e-7))+54)/35, 0, 1))
-            if rms is not None and self.speech_start_frame is None:
-                self.speech_start_frame = frame
-            elapsed = max(0,frame-(self.speech_start_frame if self.speech_start_frame is not None else frame))*.04
-            settle_phase = float(np.clip((elapsed-.8)/1.2,0,1))
-            settle = 1-.12*settle_phase*settle_phase*(3-2*settle_phase)
-            # One entrance/settle trajectory per utterance, not one emotional
-            # peak per syllable. The energy contribution is deliberately small.
-            target = (.95+.05*energy)*settle if rms is not None else 0.0
-            attack = .28 if self.speech_expression == 'happy' else .55 if self.speech_expression in ('sad','fear') else .42
-            tau = attack if target > self.speech_gain else .60
-            self.speech_gain += (target-self.speech_gain)*(1-np.exp(-.04/tau))
-            adjusted = kwargs["delta_exp"].copy().reshape(21,3)
-            # Modulate selected affect only; preserve independent pupil intent.
-            affect_points = [i for i in range(21) if i not in PROTECTED_EYE_POINTS]
-            adjusted[affect_points] *= self.speech_gain
+            residual = kwargs["delta_exp"]
+            if self.speech_performance is not None:
+                adjusted = self.speech_performance.apply(residual, rms)
+            else:
+                adjusted = residual.copy().reshape(21, 3)
             # Streaming allocation is provisional. A short actual response can
             # end mid-glance: return pupil intent during its known silent tail.
             if rms is not None:
@@ -341,7 +330,7 @@ DITTO_CHUNKSIZE = (3, 5, 2)
 DITTO_PREROLL_FRAMES = 13
 # Increment whenever the generated idle media semantics change, so existing
 # cached loops cannot mask a behavior fix in a browser session.
-IDLE_ASSET_VERSION = 13  # Add short, source-anchored acoustic response clips.
+IDLE_ASSET_VERSION = 15  # Recalibrate source-relative nod amplitudes against rendered frames.
 IDLE_FPS = 25
 IDLE_FRAME_COUNT = 400  # 16 seconds, not a slowed-down 8-second clip
 # Real talking turns reserve a small silent motion bridge at each edge. The
@@ -533,6 +522,10 @@ def live_target_controls(base: MotionPlan, patch: dict) -> dict:
     return target
 
 
+def idle_frame_count(variant: int) -> int:
+    return {3: 60, 4: 75, 5: 60}.get(variant, IDLE_FRAME_COUNT)
+
+
 def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) -> dict[int, dict[str, float | np.ndarray]]:
     """A conservative, seamless idle trajectory in Ditto's pose space.
 
@@ -540,12 +533,11 @@ def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) 
     create a pose jump. Mouth movement remains audio-driven and therefore
     stays closed for the silent idle signal.
     """
-    if variant in (3, 4):
+    if variant in (3, 4, 5):
         controls = {}
         for frame in range(frame_count + frame_offset):
             t = max(0, frame-frame_offset) / IDLE_FPS
-            nod_phase = (t-.4)/.72
-            pitch = 1.6*np.sin(np.pi*nod_phase)**2 if variant == 3 and 0<nod_phase<1 else 0
+            pitch = sum(stroke.pitch(t * 1000) for stroke in LISTENING_NODS.get(variant, ()))
             gaze = pupil_gaze_delta(GazeIntent(mode="pupil",x=.45,y=-.1)) * (gaze_aversion_weight(t,.4) if variant == 4 else 0)
             edge = float(np.clip(min((frame-frame_offset)/8,(frame_count-1-(frame-frame_offset))/8),0,1))
             controls[frame] = {"delta_pitch":float(pitch), "delta_yaw":0., "delta_roll":0.,
@@ -567,10 +559,8 @@ def build_idle_ctrl_info(variant: int, frame_count: int, frame_offset: int = 0) 
         gaze_delta = None
         if variant % 3 == 2:
             seconds = visible_frame / IDLE_FPS
-            for start, amplitude in ((2.4, 1.6), (10.2, 1.2)):
-                nod_phase = (seconds-start) / .72
-                if 0 < nod_phase < 1:
-                    pitch += amplitude * np.sin(np.pi * nod_phase) ** 2
+            yaw = roll = 0.
+            pitch = sum(stroke.pitch(seconds * 1000) for stroke in LISTENING_NODS[2])
             gaze_delta = pupil_gaze_delta(GazeIntent(mode="pupil", x=.55, y=-.15)) * gaze_aversion_weight(seconds, start=5.0)
         controls[frame] = {
             "boundary_alpha": float((lambda t: t*t*t*(10+t*(-15+6*t)))(min(1.0, visible_frame / 40, (frame_count-1-visible_frame) / 40))),
@@ -881,6 +871,7 @@ class DittoLiveRuntime:
     def __init__(self, config: WorkerConfig):
         self.config = config
         self.sdk = None
+        self.head_masks: dict[str, np.ndarray] = {}
         self.avatar_sources: dict[str, object] = {}
         self.warmed_avatars: set[str] = set()
         self.turns: dict[str, LiveTurn] = {}
@@ -891,6 +882,8 @@ class DittoLiveRuntime:
             sys.path.insert(0, str(self.config.ditto_root))
             from stream_pipeline_online import StreamSDK
             self.sdk = StreamSDK(str(self.config.config_path), str(self.config.model_root))
+            self.putback = self.sdk.putback
+            self.native_putback_mask = self.putback.mask_ori_float
             self.sdk.motion_stitch = BlinkAwareMotionStitch(self.sdk.motion_stitch, rest_mouth_gain=REST_MOUTH_GAIN)
         return self.sdk
 
@@ -907,7 +900,18 @@ class DittoLiveRuntime:
         if len(source_info["x_s_info_lst"]) > 1:
             from core.atomic_components.avatar_registrar import smooth_x_s_info_lst
             source_info["x_s_info_lst"] = smooth_x_s_info_lst(source_info["x_s_info_lst"], smo_k=13)
+        if avatar_id == "demo-seoyeon" and source_info["is_image_flag"]:
+            self.head_masks[avatar_id] = registered_head_mask(
+                self.native_putback_mask, source_info["img_rgb_lst"][0], source_info["M_c2o_lst"][0],
+                sdk.avatar_registrar.source2info.landmark478,
+            )
         self.avatar_sources[avatar_id] = source_info
+
+    def _source_for_render(self, avatar_id: str):
+        # The runtime lock serializes setup/render across avatars. Always restore
+        # the native matte when switching to an avatar without a registered one.
+        self.putback.mask_ori_float = self.head_masks.get(avatar_id, self.native_putback_mask)
+        return self.avatar_sources[avatar_id]
 
     def _warm_avatar(self, avatar_id: str, loop: asyncio.AbstractEventLoop) -> None:
         """Move lazy CUDA/ONNX/PyTorch work out of the first spoken turn.
@@ -953,7 +957,7 @@ class DittoLiveRuntime:
             ctrl_info = {}
             warm_windows = 2
         sdk.setup(
-            "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
+            "", "", frame_sink=sink, source_info=self._source_for_render(avatar_id), online_mode=True,
             sampling_timesteps=self.config.sampling_timesteps,
             emo=build_ditto_emotion_condition(warm_plan, warm_frames + DITTO_PREROLL_FRAMES), ctrl_info=ctrl_info,
         )
@@ -993,26 +997,34 @@ class DittoLiveRuntime:
         safe_avatar = hashlib.sha256(avatar_id.encode("utf-8")).hexdigest()[:24]
         return self.config.data_root / "idle" / f"{safe_avatar}-r{IDLE_ASSET_VERSION}-v{variant}"
 
-    async def prepare_idle(self, avatar_id: str, source: Path, variants: int = 5) -> list[Path]:
+    async def prepare_idle(self, avatar_id: str, source: Path, variants: int = 6) -> list[Path]:
         """Generate immutable, full-frame idle variants once per avatar."""
         await self.prepare(avatar_id, source)
         async with self.lock:
             outputs: list[Path] = []
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
             for variant in range(variants):
                 output = self.idle_path(avatar_id, variant)
-                count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
-                if (output / f"{count-1:04d}.jpg").is_file():
+                count = idle_frame_count(variant)
+                manifest = output / "motion-policy.json"
+                if (output / f"{count-1:04d}.jpg").is_file() and manifest.is_file():
                     outputs.append(output)
                     continue
                 output.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(self._generate_idle_blocking, avatar_id, variant, output)
+                metadata = {
+                    **idle_variant_policy(variant, count, IDLE_FPS), "cache_revision": IDLE_ASSET_VERSION,
+                    "avatar_id": avatar_id, "source_sha256": digest, "renderer": self.config.config_path.name,
+                    "sampling_timesteps": self.config.sampling_timesteps, "registered_head_mask": avatar_id in self.head_masks,
+                }
+                manifest.write_text(json.dumps(metadata), encoding="utf-8")
                 outputs.append(output)
             return outputs
 
     def _generate_idle_blocking(self, avatar_id: str, variant: int, output: Path) -> None:
         started = time.monotonic()
         sdk = self._load_sdk()
-        frame_count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
+        frame_count = idle_frame_count(variant)
         sink = IdleJpegFrameSink(output, expected_frames=frame_count, skip_initial_frames=DITTO_PREROLL_FRAMES)
         ctrl_info = build_idle_ctrl_info(variant, frame_count, frame_offset=DITTO_PREROLL_FRAMES)
         blink_open_frames = idle_blink_open_frames(variant)
@@ -1030,8 +1042,11 @@ class DittoLiveRuntime:
         silence = breath.astype(np.float32, copy=False)
         try:
             sdk.setup(
-                "", "", frame_sink=sink, source_info=self.avatar_sources[avatar_id], online_mode=True,
+                "", "", frame_sink=sink, source_info=self._source_for_render(avatar_id), online_mode=True,
                 sampling_timesteps=self.config.sampling_timesteps, drive_eye=True,
+                # Source-anchor only authored nod clips. The stitcher applies
+                # native blinks and explicit offsets after source/driver mixing.
+                use_d_keys=() if variant in LISTENING_NODS else None,
                 delta_eye_open_n=blink_open_frames,
                 emo=build_ditto_emotion_condition(MotionPlan(expression="neutral", intensity=0), frame_count + DITTO_PREROLL_FRAMES), ctrl_info=ctrl_info,
             )
@@ -1202,7 +1217,7 @@ class DittoLiveRuntime:
             motion_plan, frame_count, frame_offset=DITTO_PREROLL_FRAMES,
         )
         sdk.setup(
-            "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
+            "", "", frame_sink=sink, source_info=self._source_for_render(body.avatar_id), online_mode=True,
             sampling_timesteps=self.config.sampling_timesteps,
             emo=build_ditto_emotion_condition(motion_plan, frame_count + DITTO_PREROLL_FRAMES),
             ctrl_info=ctrl_info,
@@ -1719,6 +1734,18 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         # still clips packets exactly when the producer marks completion.
         target_frames = 750 if body.audio_streaming else timeline.frame_count()
         motion_plan = body.motion_plan or MotionPlan()
+        if motion_plan.expression_test:
+            performance_mode = "bypass_expression_test"
+        elif motion_plan.temporal_policy != "sobia":
+            performance_mode = "bypass_steady"
+        elif motion_plan.expression_render_mode != "speech_safe":
+            performance_mode = "bypass_" + motion_plan.expression_render_mode
+        else:
+            performance_mode = "automatic"
+        performance_info = {
+            "policy": COMPANION_EXPRESSION_POLICY, "sobia_reference_commit": SOBIA_REFERENCE_COMMIT,
+            "mode": performance_mode, "style_seed_source": "turn_id",
+        }
         ctrl_info = build_ditto_ctrl_info(motion_plan, target_frames, frame_offset=preroll_frames, hold_expression_end=True)
         emotion_condition = build_ditto_emotion_condition(motion_plan, target_frames + preroll_frames)
         delta_norms = [
@@ -1740,6 +1767,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             "expression_test": motion_plan.expression_test,
             "expression_render_mode": motion_plan.expression_render_mode,
             "temporal_policy": motion_plan.temporal_policy,
+            "companion_expression": performance_info,
             "audio_streaming": body.audio_streaming,
             "target_frames": target_frames,
             "boundary_policy": "direct_live_handoff_v12",
@@ -1758,7 +1786,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
                 "policy": PRESET_VERSION,
                 "protected_eye_points": list(PROTECTED_EYE_POINTS),
                 "blink_aware_lid_points": list(LID_CONTROL_POINTS),
-                "component_semantics": "nonzero_components is the raw preset, before mode masking; applied_peak_components is the actual pre-stitch control",
+                "component_semantics": "nonzero_components is the raw preset. applied_peak_components is the scheduled control before per-frame expression timing, live overrides and blink protection.",
                 "applied_peak_components": [
                     {"point": int(p), "axis": int(a), "offset": float(peak_control[p, a])}
                     for p, a in np.argwhere(peak_control != 0)
@@ -1797,7 +1825,7 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         )
         setup_started_at = time.monotonic()
         sdk.setup(
-            "", "", frame_sink=sink, source_info=self.avatar_sources[body.avatar_id], online_mode=True,
+            "", "", frame_sink=sink, source_info=self._source_for_render(body.avatar_id), online_mode=True,
             sampling_timesteps=sampling_timesteps,
             emo=emotion_condition, ctrl_info=ctrl_info,
         )
@@ -1808,7 +1836,11 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
         if turn.controls:
             sdk.motion_stitch.set_live_controls(turn.controls, preroll_frames, timeline)
         if motion_plan.temporal_policy == "sobia":
-            sdk.motion_stitch.set_speech_timeline(timeline, preroll_frames, motion_plan.expression)
+            sdk.motion_stitch.set_speech_timeline(
+                timeline, preroll_frames, motion_plan.expression, intensity=motion_plan.intensity,
+                turn_key=body.turn_id,
+                shape_expression=performance_mode == "automatic",
+            )
         # Do not pull speech endpoints toward the source portrait. The browser
         # hands native moving lead/tail frames directly to the live idle stream.
         if profile_enabled:
@@ -1855,11 +1887,15 @@ class DittoRealtimeRuntime(DittoLiveRuntime):
             sink.close()
             if sink.first_frame_at is not None:
                 metrics.mark("first_frame_ready", sink.first_frame_at)
+            performance = getattr(sdk.motion_stitch, "speech_performance", None)
             record_ditto_affect_diagnostic(self.config.data_root, {
                 "event": "ditto.speech_protection", "turn_id": body.turn_id,
                 "policy": PRESET_VERSION, "mode": motion_plan.expression_render_mode,
                 "protected_points": list(SPEECH_CENTER_POINTS if motion_plan.expression == "happy" and motion_plan.intensity > 0 else SPEECH_LIP_POINTS) if motion_plan.expression_render_mode == "speech_safe" else [],
                 "smile_corner_max_delta": SMILE_CORNER_MAX_DELTA if motion_plan.expression == "happy" and motion_plan.expression_render_mode == "speech_safe" else 0,
+                "companion_expression": {**performance_info, "enabled": performance is not None,
+                                         **(performance.diagnostics() if performance is not None else {})},
+                "live_control": turn.controls.diagnostics() if turn.controls is not None else {"enabled": False},
                 **getattr(sdk.motion_stitch, "protection_stats", {}),
             })
             if profile_enabled:
@@ -2097,14 +2133,17 @@ def create_app() -> FastAPI:
         if not source.is_file():
             raise HTTPException(status_code=404, detail="source image does not exist in shared data volume")
         outputs = await idle_runtime.prepare_idle(body.avatar_id, source, body.variants)
-        return {"status": "ready", "variants": len(outputs)}
+        return {"status": "ready", "variants": len(outputs), "motion_policy": {
+            "cache_revision": IDLE_ASSET_VERSION, "avatar_id": body.avatar_id,
+            "variants": [json.loads((path / "motion-policy.json").read_text(encoding="utf-8")) for path in outputs],
+        }}
 
     @app.get("/v1/assets/idle/{avatar_id}/{variant}/mjpeg")
     async def idle_asset(avatar_id: str, variant: int) -> StreamingResponse:
-        if idle_runtime is None or variant < 0 or variant > 4:
+        if idle_runtime is None or variant < 0 or variant > 5:
             raise HTTPException(status_code=404, detail="idle loop not found")
         directory = idle_runtime.idle_path(avatar_id, variant)
-        count = 60 if variant == 3 else 75 if variant == 4 else IDLE_FRAME_COUNT
+        count = idle_frame_count(variant)
         paths = [directory / f"{index:04d}.jpg" for index in range(count)]
         if not all(path.is_file() for path in paths):
             raise HTTPException(status_code=404, detail="idle loop not prepared")
@@ -2126,7 +2165,7 @@ def create_app() -> FastAPI:
                     # burst many stale frames after a stalled connection.
                     deadline = max(deadline + 1 / IDLE_FPS, time.monotonic())
                     await asyncio.sleep(max(0, deadline - time.monotonic()))
-                if variant in (3, 4):
+                if variant in (3, 4, 5):
                     return  # An acoustic cue plays once, never loops after a pause.
 
         return StreamingResponse(
@@ -2185,7 +2224,7 @@ def create_app() -> FastAPI:
     async def delete_avatar(avatar_id: str):
         cache.delete(avatar_id)
         if idle_runtime is not None:
-            for variant in range(5):
+            for variant in range(6):
                 directory = idle_runtime.idle_path(avatar_id, variant)
                 if directory.is_dir():
                     shutil.rmtree(directory)

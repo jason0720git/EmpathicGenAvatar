@@ -24,7 +24,7 @@ export function boundFlow(xy:Float32Array) {
 }
 // A regularized patch-displacement field, NOT anatomical landmark tracking.
 // Forward A->B correspondences; fixed outer border prevents camera movement.
-export function matchGeometry(a:Float32Array,b:Float32Array):FlowField {
+export function matchGeometry(a:Float32Array,b:Float32Array,avatarId?:string):FlowField {
   if(a.every((v,i)=>v===b[i])) return {xy:new Float32Array(GRID_W*GRID_H*2),reliable:1,residual:0,peak:0}
   const cost=(x:number,y:number,dx:number,dy:number,r=3)=>{
     let s=0
@@ -71,6 +71,16 @@ export function matchGeometry(a:Float32Array,b:Float32Array):FlowField {
   let peak=0
   for(let j=1;j<GRID_H-1;j++) for(let i=1;i<GRID_W-1;i++) {
     const k=j*GRID_W+i
+    // Source-normalized bounds of Seoyeon's fixed portrait. The face occupies
+    // x=.35–.65, y=.28–.53; measured collar and shoulder seams begin at y=.70.
+    // Anchor a complete grid row above them so bilinear flow stays zero even
+    // between vertices. Preserve the native full-field matcher for other crops.
+    let regionWeight=1
+    if(avatarId==='demo-seoyeon'){
+      const side=Math.abs(i/(GRID_W-1)-.5), y=j/(GRID_H-1)
+      regionWeight=(1-smooth((side-.20)/.11))*(1-smooth((y-.55)/.10))*smooth(y/.10)
+    }
+    const edge=smooth(i/2)*smooth((GRID_W-1-i)/2)*smooth(j/2)*smooth((GRID_H-1-j)/2)*regionWeight
     // Smooth neighboring matches. Invalid/occluded areas follow surrounding
     // geometry rather than chasing a tooth, blink, or high-contrast mismatch.
     for(let axis=0;axis<2;axis++) {
@@ -79,7 +89,6 @@ export function matchGeometry(a:Float32Array,b:Float32Array):FlowField {
         const n=y*GRID_W+x,w=(n===k?3:1)*(confidence[n]?1:.2)
         value+=raw[n*2+axis]*w;weight+=w
       }
-      const edge=smooth(i/2)*smooth((GRID_W-1-i)/2)*smooth(j/2)*smooth((GRID_H-1-j)/2)
       xy[k*2+axis]=clamp(value/weight,-10,10)*edge
       peak=Math.max(peak,Math.abs(xy[k*2+axis]))
     }
@@ -211,9 +220,14 @@ export function warmGeometryHandoff(source:HTMLCanvasElement) {
   } catch { sharedGpu=null }
 }
 export class GeometryHandoff {
+  private readonly avatarId?:string
+  constructor(avatarId?:string){
+    this.avatarId=avatarId
+    this.stats.motion_region=avatarId==='demo-seoyeon'?'seoyeon_head':'portrait'
+  }
   private sampleCanvas:HTMLCanvasElement|null=null
   private previous:Float32Array|null=null
-  stats={mode:'pending',frames:0,peak_ms:0,reliable:0,residual:0,peak_displacement:0,fallback_frames:0,last_error:''}
+  stats={mode:'pending',motion_region:'portrait',frames:0,peak_ms:0,reliable:0,residual:0,peak_displacement:0,fallback_frames:0,last_error:''}
   private sample(image:CanvasImageSource){
     const c=this.sampleCanvas??(this.sampleCanvas=document.createElement('canvas'))
     if(c.width!==FLOW_W){c.width=FLOW_W;c.height=FLOW_H}
@@ -228,7 +242,7 @@ export class GeometryHandoff {
     if(t<=0 || t>=1){ctx.drawImage(t<=0?a:b,0,0,w,h);return}
     const start=performance.now()
     try {
-      const field=matchGeometry(this.sample(a),this.sample(b))
+      const field=matchGeometry(this.sample(a),this.sample(b),this.avatarId)
       if(field.reliable<.15 || field.residual>800)throw new Error('Unreliable frame correspondence')
       if(this.previous)smoothFlow(field.xy,this.previous)
       this.previous=field.xy

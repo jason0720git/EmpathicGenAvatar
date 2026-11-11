@@ -51,8 +51,12 @@ AFFECT_TOOL = {
     "name": AFFECT_TOOL_NAME,
     "description": (
         "Select the one display affect the AI avatar should show in its next reply. "
-        "This is not a diagnosis or durable statement about the user. Call exactly once "
-        "before the avatar speaks."
+        "Consider what the reply does (answer, clarify, reflect, repair) and how it supports "
+        "the speaker. Use a restrained caring expression for hurt or worry and happy for "
+        "the speaker's own delight. Choose neutral for a correction, immediate safety support, "
+        "a quoted emotion, or ambiguous mixed feelings. Never mirror hostility toward the "
+        "speaker. This is not a diagnosis or durable statement about the user. Call exactly "
+        "once before the avatar speaks."
     ),
     "parameters": {
         "type": "object",

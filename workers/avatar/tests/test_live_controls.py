@@ -72,6 +72,24 @@ def test_latest_sequence_is_applied_once_and_closed_turn_cannot_control_next():
     assert next_turn.receive({'type':'control','seq':1,'intensity':.2})['seq']==1
 
 
+def test_ownership_log_counts_paced_channels_and_release_without_counting_zero_weight_frames():
+    control, _ = state()
+    control.receive({"type": "control", "seq": 1, "gaze": {"x": .5}})
+    control.apply({}, 0, boundary_weight=0.)
+    control.apply({}, 40)
+    control.receive({"type": "control", "seq": 2, "head": {"pitch_deg": 2}})
+    control.apply({}, 80)
+    assert control.diagnostics()["channel_owned_frames"] == {"face": 0, "gaze": 2, "head": 1}
+    control.receive({"type": "control.reset", "seq": 3})
+    for frame in range(160):
+        control.apply({}, 120 + frame * 40)
+    final = control.diagnostics()
+    control.apply({}, 8000)
+    assert final == control.diagnostics()
+    assert final["last_applied_seq"] == final["last_received_seq"] == 3
+    assert final["channel_owned_frames"]["head"] > 1 and final["channel_owned_frames"]["face"] == 0
+
+
 def test_face_override_is_applied_inside_blink_and_lip_protection():
     # A fake stitch includes a coupled lip displacement to verify that live
     # override cannot bypass the existing final articulation projection.

@@ -47,6 +47,7 @@ export interface AffectIntent {
 }
 
 export interface MotionPlan {
+  temporal_policy?: 'steady' | 'sobia'
   expression_render_mode?: 'off' | 'native' | 'legacy' | 'speech_safe'
   expression: ExpressionIntent
   intensity: number

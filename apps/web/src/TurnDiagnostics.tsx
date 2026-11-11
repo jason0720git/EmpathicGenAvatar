@@ -14,7 +14,7 @@ const names:Record<string,string>={
 function summary(e:Event):string{
   if(e.event==='renderer.completed'){
     const r=e.renderer as {applied_motion?:{expression?:string;intensity?:number};status?:string}
-    return r.applied_motion?`${r.applied_motion.expression} · ${Math.round((r.applied_motion.intensity??0)*100)}% (worker 응답)`:`${r.status??'완료'} · 실제 적용 값 미제공 (요청 파라미터와 구분)`
+    return r.applied_motion?`${r.applied_motion.expression} · ${Math.round((r.applied_motion.intensity??0)*100)}% (생성기에 전달된 설정)`:`${r.status??'완료'} · 적용 값 미제공`
   }
   const behavior=e.behavior as {affect?:{emotion:string;intensity:number};source?:string}|undefined
   const affect=(e.arguments??e.affect??behavior?.affect) as {emotion:string;intensity:number}|undefined
@@ -60,7 +60,7 @@ export function TurnDiagnostics({sessionId,turnId,online,active,error}:{sessionI
   },[sessionId,turnId,online])
   return <section className="turn-diagnostics" aria-label="실시간 응답 진단">
     <h4>응답 진단 <small>{turnId?status:'대기 중'}</small></h4>
-    <p>관측 → LLM 입력 → tool 결과 → Ditto 적용. 내부 사고 과정은 제공되지 않으며, 아래는 실제 입출력입니다.</p>
+    <p>응답에 선택된 표정과 강도, 생성기에 전달된 머리·시선 설정을 확인하세요.</p>
     {error&&<p role="alert">{error}</p>}
     <div className="diagnostic-events">{events.map((event)=><article key={String(event.sequence)}>
       <strong>{names[String(event.event)]??String(event.event)}</strong><time>{String(event.at).slice(11,19)} UTC</time>

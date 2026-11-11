@@ -83,8 +83,12 @@ class TurnTelemetryIn(BaseModel):
         "first_video_decoded", "playback_started", "playback_ended",
         "jpeg_decode_failed", "video_pts_gap",
         "socket_error", "socket_closed", "playout_drift", "render_requested", "first_frame_presented", "visual_transition",
+        "stream_timing", "listening_started", "listening_ended", "motion_cue", "live_control", "playback_interrupted",
     ]
     elapsed_ms: int = Field(ge=0, le=300_000)
+    session_id: str | None = Field(default=None, max_length=128)
+    avatar_id: str | None = Field(default=None, max_length=128)
+    policy_version: str | None = Field(default=None, max_length=80)
     details: dict[str, int | float | str | bool] = Field(default_factory=dict)
 
 

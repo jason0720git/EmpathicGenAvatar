@@ -9,10 +9,14 @@ const assert = require('node:assert/strict');
 const output = path.resolve(process.env.LIVE_CONTROL_OUTPUT || 'artifacts/live-control-e2e');
 const isolated = process.argv.includes('--isolated');
 const ui = process.argv.includes('--ui');
+// Exercise the full production range for measurable yaw against native
+// speech motion. The default smoke still checks the smallest keyboard step.
+const headRange = process.argv.includes('--head-range');
 const sequence = ui ? [
   { label: 'ui-expression', type: 'control' },
   { label: 'ui-gaze-left', type: 'control' },
   { label: 'ui-head', type: 'control' },
+  ...(headRange ? [{ label: 'ui-head-reverse', type: 'control' }] : []),
   { label: 'ui-reset', type: 'control.reset' },
 ] : isolated ? [
   { label: 'gaze-left', type: 'control', gaze: { x: -.65, y: 0 } },
@@ -119,7 +123,8 @@ async function main() {
           await select.selectOption((await select.inputValue()) === 'happy' ? 'sad' : 'happy');
         }
         if (label === 'ui-gaze-left') await page.getByLabel('시선 좌우', { exact: true }).press('Home');
-        if (label === 'ui-head') await page.getByLabel('머리 좌우', { exact: true }).press('ArrowRight');
+        if (label === 'ui-head') await page.getByLabel('머리 좌우', { exact: true }).press(headRange ? 'End' : 'ArrowRight');
+        if (label === 'ui-head-reverse') await page.getByLabel('머리 좌우', { exact: true }).press('Home');
         if (label === 'ui-reset') await page.getByRole('button', { name: '자동 동작으로 복귀', exact: true }).click();
         sent = await page.evaluate(label => ({ ...window.liveControlAudit.sentMessages.at(-1), label }), label);
         assert(sent.seq, 'UI did not send live control');
@@ -142,7 +147,9 @@ async function main() {
       sent.receivedToAppliedMs = result.receivedAt - sent.sentAt;
       sent.visible800msObservationMs = displayedAt - sent.sentAt;
       await page.screenshot({ path: path.join(output, `${i}-${label}.png`), fullPage: true });
-      await page.waitForTimeout(500);
+      // At the output slew limit the full +6 to -6 degree reversal needs
+      // about two seconds of generated motion before asking for the reset.
+      await page.waitForTimeout(headRange && label.startsWith('ui-head') ? 1600 : 500);
     }
     await page.waitForFunction(() => !document.querySelector('canvas.rendered-avatar-video'), null, { timeout: 120000 });
     await page.waitForTimeout(500);

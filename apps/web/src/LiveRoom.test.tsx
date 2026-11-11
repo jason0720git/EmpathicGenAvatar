@@ -215,10 +215,10 @@ it('uses microphone speech cues while listening and clears them when capture sto
   await act(async()=>root.render(<LiveRoom key="microphone" avatar={{id:'a',name:'Test',persona:'test',voice:'test',status:'ready',created_at:'',engine:'remote'}} method="ditto_realtime_trt10" sessionInstruction="test" apiOnline onExit={()=>{}}/>))
   await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 시작"]')!.click())
   await act(async()=>vi.advanceTimersByTimeAsync(1900))
-  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).toContain('/idle/3/')
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).toContain('/idle/5/')
   await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="음성 입력 종료 및 전송"]')!.click())
   expect(stopTrack).toHaveBeenCalled()
-  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).not.toContain('/idle/3/')
+  expect(host.querySelector('.idle-avatar-video')!.getAttribute('data-source')).not.toContain('/idle/5/')
 })
 
 it('ignores delayed recognition callbacks from the previous microphone session', async()=>{

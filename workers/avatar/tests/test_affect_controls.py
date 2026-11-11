@@ -94,13 +94,13 @@ def test_listening_loop_has_separate_brief_nod_and_gaze_events():
 
 def test_acoustic_clips_are_anchored_and_channels_are_separate():
     from app.main import build_idle_ctrl_info
-    for variant,count in ((3,60),(4,75)):
+    for variant,count in ((3,60),(4,75),(5,60)):
         controls=build_idle_ctrl_info(variant,count,13)
         assert controls[13]['boundary_alpha']==controls[count+12]['boundary_alpha']==0
         assert controls[13]['delta_pitch']==controls[count+12]['delta_pitch']==0
         assert not np.any(controls[13]['delta_exp']) and not np.any(controls[count+12]['delta_exp'])
-        if variant==3:
-            assert max(c['delta_pitch'] for c in controls.values()) <= 1.6
+        if variant in (3,5):
+            assert max(c['delta_pitch'] for c in controls.values()) == 4.
             assert all(not np.any(c['delta_exp']) for c in controls.values())
         else:
             assert all(c['delta_pitch']==0 for c in controls.values())
@@ -490,11 +490,11 @@ def test_speech_boundary_anchors_only_silent_frames_with_live_duration():
 def test_native_motion_defaults_and_original_idle_are_restored():
     import inspect
     from app.main import DittoLiveRuntime, DittoRealtimeRuntime, IDLE_ASSET_VERSION, build_idle_ctrl_info, DITTO_TURN_LEAD_FRAMES, DITTO_TURN_TAIL_FRAMES
-    # Do not regress into expression-only head locking in either setup path.
-    assert 'use_d_keys=' not in inspect.getsource(DittoLiveRuntime._generate_idle_blocking)
+    # Spoken turns retain native head motion. Cached nod clips are separately
+    # tested through _generate_idle_blocking with captured SDK setup arguments.
     assert 'use_d_keys=' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
     assert 'set_boundary_timeline(' not in inspect.getsource(DittoRealtimeRuntime._run_realtime_sdk)
-    assert IDLE_ASSET_VERSION == 13  # Rest-mouth calibration invalidates older loops.
+    assert IDLE_ASSET_VERSION == 15
     assert DITTO_TURN_LEAD_FRAMES == DITTO_TURN_TAIL_FRAMES == 25
     for variant in range(3):
         controls=build_idle_ctrl_info(variant,400)

@@ -7,22 +7,23 @@ const packet = (body: number[]) => {
   const header = new TextEncoder().encode(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${body.length}\r\n\r\n`)
   return new Uint8Array([...header,...body,13,10])
 }
-it('completes a finite listening cue only after painting its final frame', async () => {
+it.each([[1, 'completed'], [2, 'failed']] as const)('checks a finite cue with %i expected frames after painting', async (expectedFrames, phase) => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   let paint: FrameRequestCallback = () => {}
   vi.stubGlobal('requestAnimationFrame', vi.fn(callback => { paint = callback; return 1 }))
   vi.stubGlobal('cancelAnimationFrame', vi.fn())
-  const bitmap = { width: 120, height: 160, close: vi.fn() }, draw = vi.fn(), complete = vi.fn()
+  const bitmap = { width: 120, height: 160, close: vi.fn() }, draw = vi.fn(), complete = vi.fn(), progress = vi.fn()
   vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue(bitmap))
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: draw } as unknown as CanvasRenderingContext2D)
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, body: new ReadableStream({ start(c) { c.enqueue(packet([1])); c.close() } }) }))
   const root = createRoot(document.createElement('div')), ref = createRef<HTMLCanvasElement>()
   try {
-    await act(async () => root.render(<IdleCanvas source="/cue" canvasRef={ref} className="idle" label="idle" onReady={vi.fn()} onComplete={complete} />))
+    await act(async () => root.render(<IdleCanvas source="/cue" canvasRef={ref} className="idle" label="idle" onReady={vi.fn()} onComplete={complete} expectedFrames={expectedFrames} onCueProgress={progress} />))
     expect(complete).not.toHaveBeenCalled()
     await act(async () => paint(0))
     expect(draw).toHaveBeenCalledWith(bitmap, 0, 0)
     expect(complete).toHaveBeenCalledTimes(1)
+    expect(progress.mock.calls).toEqual([['painted', 1], [phase, 1]])
     expect(ref.current?.dataset.painted).toBe('true')
   } finally { await act(async () => root.unmount()); vi.restoreAllMocks(); vi.unstubAllGlobals() }
 })

@@ -60,6 +60,7 @@ class LiveControlState:
         self._active = False
         self._expression = 'neutral'
         self._owned = set()
+        self._owned_frames = {"face": 0, "gaze": 0, "head": 0}
         self._pacing = False
         self._playback_started = False
         self._playback_pts = -1
@@ -137,6 +138,12 @@ class LiveControlState:
             self._closed = True
             self._condition.notify_all()
 
+    def diagnostics(self) -> dict:
+        """Snapshot after the render thread joins. Includes the reset release."""
+        with self._lock:
+            return {"enabled": True, "last_received_seq": self._seq, "last_applied_seq": self._applied,
+                    "channel_owned_frames": dict(self._owned_frames)}
+
     def apply(self, controls: dict, pts_ms: int, boundary_weight: float = 1) -> dict:
         with self._lock:
             if self._closed or not self._seq:
@@ -196,4 +203,7 @@ class LiveControlState:
             self._owned.clear()
             self._current = None
             return controls
+        if weight > 0:
+            for channel in self._owned:
+                self._owned_frames[channel] += 1
         return result

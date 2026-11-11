@@ -50,7 +50,10 @@ export const api = {
     return request<Avatar>('/api/avatars', { method: 'POST', body: form })
   },
   deleteAvatar: (id: string) => request<void>(`/api/avatars/${id}`, { method: 'DELETE' }),
-  prepareIdle: (id: string) => request<{ status: string }>(`/api/avatars/${id}/idle`, { method: 'POST' }),
+  prepareIdle: (id: string) => request<{ status: string; motion_policy?: {cache_revision: number; variants: {
+    variant: number; cycles: number; source_sha256: string; fps: number; frames: number
+    nods: {start_ms: number; peak_pitch_delta_deg: number; down_ms: number; up_ms: number}[]
+  }[]} | null }>(`/api/avatars/${id}/idle`, { method: 'POST' }),
   createSession: (avatarId: string, rendererMethod: RendererMethod, sessionInstruction?: string, mode: 'realtime' | 'wav_test' = 'realtime') =>
     request<LiveSession>('/api/live/sessions', {
       method: 'POST',
@@ -85,7 +88,7 @@ export const api = {
     request<{ state: string }>(`/api/live/sessions/${sessionId}/interrupt`, { method: 'POST' }),
   endSession: (sessionId: string) =>
     request<void>(`/api/live/sessions/${sessionId}`, { method: 'DELETE' }),
-  telemetry: (payload: { turn_id: string; event: string; elapsed_ms: number; details?: Record<string, number | string | boolean> }) =>
+  telemetry: (payload: { turn_id: string; event: string; elapsed_ms: number; session_id?: string; avatar_id?: string; policy_version?: string; details?: Record<string, number | string | boolean> }) =>
     request<void>('/api/telemetry/turn', { method: 'POST', body: JSON.stringify(payload) }).catch(() => undefined),
   expressionFeedback: (payload: {session_id: string; turn_id: string; issue: string; severity: number; at_ms?: number; note: string}) =>
     request<{saved: boolean; turn_id: string}>('/api/debug/expression-feedback', {method: 'POST', body: JSON.stringify(payload)}),

@@ -159,7 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def record_turn_telemetry(body: TurnTelemetryIn) -> Response:
         # Privacy boundary: this endpoint accepts timing/status fields only.
         # It never receives prompt text, TTS PCM, or JPEG/video payloads.
-        record = {"turn_id": body.turn_id, "event": body.event, "elapsed_ms": body.elapsed_ms, "details": body.details}
+        record = {"at": datetime.now(timezone.utc).isoformat(), **body.model_dump(exclude_none=True)}
         with telemetry_lock:
             with telemetry_path.open("a", encoding="utf-8") as output:
                 output.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -294,14 +294,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return None
 
     @app.post("/api/avatars/{avatar_id}/idle", status_code=202)
-    async def prepare_idle_avatar(avatar_id: str) -> dict[str, str]:
+    async def prepare_idle_avatar(avatar_id: str) -> dict:
         avatar = _avatar_or_404(store, avatar_id)
         source_path = store.get_source_path(avatar.id)
         selected = idle_renderer()
         if selected is None or source_path is None or not source_path.is_file():
             raise HTTPException(status_code=409, detail="Ditto idle renderer is not available")
-        await selected.prepare_idle(avatar, source_path)
-        return {"status": "ready"}
+        policy = await selected.prepare_idle(avatar, source_path)
+        return {"status": "ready", "motion_policy": policy}
 
     @app.get("/api/avatars/{avatar_id}/idle/{variant}")
     async def idle_avatar_asset(avatar_id: str, variant: int) -> Response:
@@ -319,7 +319,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def idle_avatar_mjpeg(avatar_id: str, variant: int) -> StreamingResponse:
         _avatar_or_404(store, avatar_id)
         selected = idle_renderer()
-        if selected is None or variant < 0 or variant > 4:
+        if selected is None or variant < 0 or variant > 5:
             raise HTTPException(status_code=404, detail="idle loop not found")
 
         async def proxy_stream():
