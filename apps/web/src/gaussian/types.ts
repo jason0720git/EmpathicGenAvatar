@@ -25,6 +25,7 @@ export type Controls = {
 export const DEFAULT_CONTROLS: Controls = { emotion: 'neutral', intensity: 0.65,
   gaze_x: 0, gaze_y: 0, head_yaw: 0, head_pitch: 0, head_roll: 0, nod: false }
 export type WireEvent = { type: string; [key: string]: unknown }
-export type RendererStats = { oralMaterial?: {version:string;changed_splats:number}; fps: number; head: boolean; splats: number; frames: number; eyeOcclusion?: boolean; eyeOcclusionMode?: string; portraitFov?: number; oralOcclusion?: boolean; tongue?: boolean;
+export type HeadMotionReceipt = {driver:string;applied:{pitch:number;yaw:number;roll:number};root:number[];torsoAnchorSplats:number;torsoDriftMm:number}
+export type RendererStats = { displayedFrame?:MotionFrame; renderSequence?:number; headMotion?:HeadMotionReceipt; oralMaterial?: {version:string;changed_splats:number}; fps: number; head: boolean; splats: number; frames: number; eyeOcclusion?: boolean; eyeOcclusionMode?: string; portraitFov?: number; oralOcclusion?: boolean; tongue?: boolean;
   oralVersion?:string; oralOpen?:number; oralAperture?:number[]; renderMs?:number;roundTripMs?:number;error?:string;
   rig?: { channelCount: number; channels: Record<string, { requested: number; applied: number|null; uploaded: number|null; supported: boolean; maxDeltaMm: number }> } }

@@ -73,13 +73,21 @@ class SessionLog:
             out.write(data)
 
     def archive(self) -> bytes:
-        buffer = io.BytesIO()
-        with self.lock, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted(self.path.iterdir()):
-                if path.is_file():
-                    archive.write(path, path.name)
-            archive.writestr("audio-format.txt", "All .pcm files are raw mono signed 16-bit little-endian PCM at 24000 Hz.\nExample: ffmpeg -f s16le -ar 24000 -ac 1 -i TURN-output-24000.pcm output.wav\n")
-        return buffer.getvalue()
+        with self.lock:
+            return session_archive(self.path)
+
+
+def session_archive(directory: Path) -> bytes:
+    from .gaussian_review import summary
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(directory.iterdir()):
+            if path.is_file():
+                archive.write(path, path.name)
+        archive.writestr("summary.json", json.dumps(summary(directory), ensure_ascii=False, indent=2))
+        archive.writestr("audio-format.txt", "All .pcm files are raw mono signed 16-bit little-endian PCM at 24000 Hz.\nExample: ffmpeg -f s16le -ar 24000 -ac 1 -i TURN-output-24000.pcm output.wav\n")
+    return buffer.getvalue()
 
 
 def validate_asset_zip(data: bytes):

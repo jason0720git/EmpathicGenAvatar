@@ -44,6 +44,9 @@ class BehaviorPlan:
     gaze: dict[str, float] = field(default_factory=lambda: {"x": 0., "y": 0.})
     head: dict[str, float] = field(default_factory=lambda: {"pitch": 0., "yaw": 0., "roll": 0.})
     source: str = "rule_based_sobia_inspired"
+    move: str | None = None
+    stance: str | None = None
+    confidence: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -59,7 +62,8 @@ class BehaviorController:
                     nod: bool = False, gaze: Mapping[str, float] | None = None,
                     head: Mapping[str, float] | None = None, nod_start_seconds: float = .45,
                     nod_duration_seconds: float = .72, nod_amplitude_degrees: float = 3.5,
-                    source: str = "rule_based_sobia_inspired") -> BehaviorPlan:
+                    source: str = "rule_based_sobia_inspired", move: str | None = None,
+                    stance: str | None = None, confidence: float | None = None) -> BehaviorPlan:
         if emotion not in EMOTIONS:
             raise ValueError(f"Unsupported expression: {emotion}")
         if intent not in INTENTS:
@@ -81,11 +85,11 @@ class BehaviorController:
             target_head.update({axis: _bounded(value, -bounds[axis], bounds[axis]) for axis, value in head.items()})
         return BehaviorPlan(emotion, strength, intent, bool(nod), _bounded(nod_start_seconds, 0., 10.),
                             _bounded(nod_duration_seconds, .3, 1.5), _bounded(nod_amplitude_degrees, 0., 6.),
-                            target_gaze, target_head, source)
+                            target_gaze, target_head, source, move, stance, confidence)
 
     def mix_frame(self, coefficients: Mapping[str, float] | None, time_seconds: float,
                   plan: BehaviorPlan | None = None, *, speaking: bool = True,
-                  idle_motion: bool = True) -> dict[str, Any]:
+                  idle_motion: bool = True, bake_nod: bool = True) -> dict[str, Any]:
         plan = plan or self.from_affect(intent="attentive")
         t = max(0., _bounded(time_seconds, 0., 1e9))
         raw = canonical_weights(coefficients or {})
@@ -124,7 +128,7 @@ class BehaviorController:
             head["yaw"] += .28 * math.sin(t * .73)
             head["pitch"] += .18 * math.sin(t * .57)
         nod_phase = (t - plan.nod_start_seconds) / plan.nod_duration_seconds
-        if plan.nod and 0. <= nod_phase <= 1.:
+        if bake_nod and plan.nod and 0. <= nod_phase <= 1.:
             head["pitch"] += plan.nod_amplitude_degrees * math.sin(math.pi * nod_phase) ** 2
         # Positive gaze x = avatar's right, positive y = up.
         x, y = gaze["x"] * .55, gaze["y"] * .55

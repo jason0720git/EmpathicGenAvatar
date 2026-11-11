@@ -26,10 +26,14 @@ from .gaussian_behavior import BehaviorController
 from .gaussian_realtime import RealtimeVoice, BehaviorIntent
 from .gaussian_store import AvatarFiles, SessionLog, checked_id, utc_now, validate_asset_zip
 from .perception import PerceptionClient
+from .gaussian_review import summary as session_summary
+
+CONTROLLER = "sobia-gaussian-v9"
 
 
 class SessionIn(BaseModel):
     avatar_id: str
+    mode: Literal["realtime", "wav_test", "preview"] = "realtime"
     voice: Literal["marin", "cedar", "echo", "alloy", "coral", "sage", "shimmer", "ash", "ballad", "verse"] = "marin"
     instructions: str = Field(default="따뜻하고 차분하게 한국어로 짧게 대화하세요.", max_length=4000)
 
@@ -51,6 +55,10 @@ class FeedbackIn(BaseModel):
     rating: int = Field(ge=1, le=5)
     comment: str = Field(default="", max_length=4000)
     turn_id: str | None = None
+
+
+class PreviewBatch(BaseModel):
+    events: list[dict] = Field(min_length=1, max_length=32)
 
 
 def create_gaussian_app(root: Path | None = None, api_key: str | None = None) -> FastAPI:
@@ -123,7 +131,7 @@ def create_gaussian_app(root: Path | None = None, api_key: str | None = None) ->
         return {"openai": {"ready": bool(key), "model": model, "status": "configured" if key else "missing_key"},
                 "a2f": a2f, "generator": generator, "renderer": "LAM 3DGS WebGL",
                 "logging": {"enabled": True, "path": str(data / "sessions"), "audio": True, "transcripts": True},
-                "controller": "SOBIA-inspired rule-based v1; separate from trained empathy research model"}
+                "controller": CONTROLLER}
 
     @app.get("/gaussian-api/avatars")
     async def avatars():
@@ -227,11 +235,32 @@ def create_gaussian_app(root: Path | None = None, api_key: str | None = None) ->
         session_id = uuid.uuid4().hex[:24]
         config = {"id": session_id, **body.model_dump(), "created_at": utc_now(), "model": model,
                   "a2f_endpoint": a2f_endpoint, "avatar_sha256": selected.get("asset_sha256"),
-                  "audio_format": "mono pcm16le 24000Hz", "controller": "rule_based_sobia_inspired_v1",
+                  "audio_format": "mono pcm16le 24000Hz", "controller": CONTROLLER,
                   "avatar_engine": selected.get("kind", "lam"), "render_driver": "a2f-arkit-to-flame-v1" if selected.get("kind") == "official_live" else "lam-arkit"}
         log = SessionLog(data / "sessions", session_id, config)
         sessions[session_id] = {"config": config, "log": log}
         return {"id": session_id, "ws_url": f"/gaussian-ws/{session_id}", "logging": True}
+
+    @app.post("/gaussian-api/sessions/{session_id}/preview-events")
+    async def preview_events(session_id: str, body: PreviewBatch):
+        entry = session_or_404(session_id)
+        if entry["config"].get("mode") != "preview" or not entry["log"]:
+            raise HTTPException(409, "Create a new preview session")
+        try:
+            for p in body.events:
+                if (not isinstance(p.get("event"), str) or len(p["event"]) > 100 or
+                        len(json.dumps(p, allow_nan=False).encode()) > 24000):
+                    raise ValueError("Invalid preview event")
+        except ValueError as exc:
+            raise HTTPException(422, "Invalid preview event") from exc
+        for p in body.events:
+            entry["log"].record("preview.telemetry", {"details": p})
+        return {"saved": len(body.events)}
+
+    @app.get("/gaussian-api/sessions/{session_id}/summary")
+    async def summary_report(session_id: str):
+        session_or_404(session_id)
+        return await asyncio.to_thread(session_summary, data / "sessions" / session_id)
 
     @app.get("/gaussian-api/sessions/{session_id}/logs.zip")
     async def logs(session_id: str):
@@ -264,7 +293,8 @@ def create_gaussian_app(root: Path | None = None, api_key: str | None = None) ->
         if ws.headers.get("origin") not in origins | {None}:
             await ws.close(code=4403)
             return
-        if session_id not in sessions or session_id in active_rooms:
+        if (session_id not in sessions or session_id in active_rooms or
+                sessions[session_id]["config"].get("mode") == "preview"):
             await ws.close(code=4409 if session_id in active_rooms else 4404)
             return
         entry = sessions[session_id]
@@ -333,7 +363,7 @@ class GaussianRoom:
             count += 1
             if (not self.turn_task or self.turn_task.done()) and not self.awaiting_playback:
                 elapsed = time.monotonic() - (self.manual_start if self.manual else self.started)
-                mixed = self.controller.mix_frame({}, elapsed, self.active_plan(), speaking=False)
+                mixed = self.controller.mix_frame({}, elapsed, self.active_plan(), speaking=False, bake_nod=False)
                 packet = {"turn_id": "idle", "pts_ms": elapsed*1000, **mixed, "source": "behavior_controller"}
                 await self.emit("animation.frame", **packet)
                 self.trace("animation.idle", packet)
@@ -467,7 +497,7 @@ class GaussianRoom:
                 frames += 1
                 if first_motion is None:
                     first_motion = (time.monotonic()-started)*1000
-                mixed = self.controller.mix_frame(frame.coefficients, frame.time_seconds, self.active_plan(plan))
+                mixed = self.controller.mix_frame(frame.coefficients, frame.time_seconds, self.active_plan(plan), bake_nod=False)
                 packet = {"turn_id": turn_id, "pts_ms": frame.time_seconds*1000, "speech_energy": energy_windows[min(int(frame.time_seconds*50),len(energy_windows)-1)] if energy_windows else 0., **mixed, "source": "nvidia_a2f+behavior_controller"}
                 self.trace("animation.frame", packet)
                 await self.emit("animation.frame", **packet)
@@ -475,6 +505,7 @@ class GaussianRoom:
         async def intent(chosen: BehaviorIntent):
             nonlocal plan, a2f_task
             plan = self.controller.from_affect(chosen.emotion, chosen.intensity, intent=chosen.intent, nod=chosen.nod,
+                move=chosen.move, stance=chosen.stance, confidence=chosen.confidence,
                 head=chosen.head.model_dump(), gaze=chosen.gaze.model_dump(),
                 source="manual_expression" if self.manual else "llm_tool_call")
             self.trace("behavior.plan", plan.as_dict())

@@ -8,6 +8,7 @@ import { DEFAULT_CONTROLS, type Avatar, type Controls, type Health, type MotionF
 import './gaussian.css'
 import { NaturalMotion } from './naturalMotion'
 import { decodeTestWav, pcmBase64 } from './wavTest'
+import { PreviewCapture, type PreviewStatus } from './previewCapture'
 
 type Chat = { id: string; role: string; text: string; final: boolean }
 type Trace = { at: string; type: string; detail: string }
@@ -85,7 +86,13 @@ export function GaussianStudio() {
   const lastTurn = useRef('')
   const completedTurns = useRef(new PlaybackCompletion())
   const micRef = useRef(false)
-  const nodUntil = useRef(0)
+  const [previewStatus,setPreviewStatus]=useState<PreviewStatus|null>(null)
+  const [preview]=useState(()=>new PreviewCapture(
+    async id=>(await request<{id:string}>('/sessions',json({avatar_id:id,mode:'preview'}))).id,
+    async (id,events)=>{const {saved}=await request<{saved:number}>(`/sessions/${id}/preview-events`,{...json({events}),keepalive:true});if(saved!==events.length)throw new Error('저장된 샘플 수가 일치하지 않습니다.')},
+    setPreviewStatus))
+  const runInfo=useRef({asset_id:'',asset_sha256:'',mode:'realtime'})
+  const replyTextTurn=useRef(''),receiptTurn=useRef('')
   const mounted = useRef(true)
   const scroll = useRef<HTMLDivElement>(null)
   const avatar = avatars.find(item => item.id === avatarId)
@@ -96,6 +103,10 @@ export function GaussianStudio() {
   const currentAvatarStatus = avatar?.status
   const currentCameraJson = JSON.stringify(avatar?.source_camera ?? avatar?.generation?.manifest?.source_camera ?? null)
   const connected = !!session && !['disconnected', 'error', 'connecting'].includes(state)
+  useEffect(()=>{runInfo.current={asset_id:avatarId,asset_sha256:avatar?.asset_sha256??'',mode}
+    motion.current.resetPolicy()
+    return ()=>{preview.finish()}
+  },[avatarId,avatar?.asset_sha256,mode,preview])
   const trace = useCallback((type: string, data?: unknown) => {
     const detail = typeof data === 'string' ? data : JSON.stringify(data ?? {})
     setEvents(previous => [{ at: new Date().toLocaleTimeString('ko-KR', { hour12: false }), type, detail: detail.slice(0, 800) }, ...previous].slice(0, 120))
@@ -104,19 +115,32 @@ export function GaussianStudio() {
     if (ws.current?.readyState === WebSocket.OPEN) { ws.current.send(JSON.stringify(event)); return true }
     return false
   }, [])
+  const recordAction=useCallback((event:string,details:Record<string,unknown>)=>{
+    const packet={type:'telemetry',event,client_ms:performance.now(),...details}
+    if(!send(packet)&&!sessionRef.current && runInfo.current.asset_id) preview.start(runInfo.current.asset_id,performance.now(),packet)
+    trace(event,details)
+  },[send,trace,preview])
   const getFrame = useCallback((): MotionFrame => {
     const clock = audio.current.clock()
     const frame = timeline.current.sample(clock.turn, clock.ms)
     const manual = manualFrame(automaticRef.current ? {...DEFAULT_CONTROLS,intensity:0} : controlsRef.current, performance.now() / 1000)
-    if (nodUntil.current > performance.now()) manual.head!.pitch += Math.sin((nodUntil.current - performance.now()) / 650 * Math.PI * 2) * 6
+    const now=performance.now()/1000
+    if(clock.speaking && automaticRef.current && clock.turn && clock.turn===replyTextTurn.current && receiptTurn.current!==clock.turn){
+      receiptTurn.current=clock.turn;motion.current.requestNod(now,'spoken_receipt')
+    }
     // Idle server policy can arrive without any output audio.
     const selected = !automaticRef.current
       ? (frame ? manualSpeechFrame(frame, controlsRef.current, performance.now() / 1000) : manual)
       : frame ?? (idleFrame.current && sessionRef.current ? idleFrame.current : manual)
-    const animated = motion.current.apply(selected, performance.now()/1000, clock.speaking, naturalEnabledRef.current, vitalityRef.current)
+    const animated = motion.current.apply(selected, now, clock.speaking, naturalEnabledRef.current, vitalityRef.current)
+    for(const decision of motion.current.drainPolicyEvents()){
+      const packet={type:'telemetry',event:decision.event,details:decision.details,client_ms:now*1000,turn_id:clock.turn||selected.turn_id}
+      if(!send(packet))preview.add(packet)
+      trace(decision.event,decision.details)
+    }
     latestFrame.current = animated
     return animated
-  }, [])
+  }, [send,preview,trace])
 
   const refresh = useCallback(async () => {
     const results = await Promise.allSettled([request<Health>('/health'), request<Avatar[] | { avatars: Avatar[] }>('/avatars')])
@@ -127,7 +151,7 @@ export function GaussianStudio() {
       const value = results[1].value
       const list = Array.isArray(value) ? value : value.avatars
       setAvatars(list)
-      setAvatarId(current => current || list.find(item => item.status === 'ready')?.id || '')
+      setAvatarId(current => current || list.find(item=>item.kind==='official_live' && item.status==='ready')?.id || list.find(item => item.status === 'ready')?.id || '')
     }
   }, [trace])
 
@@ -173,7 +197,7 @@ export function GaussianStudio() {
       const clock = audio.current.clock()
       const current: Metrics = { fps: stats?.fps ?? 0, queued: clock.queuedMs, audio: audio.current.chunks,
         animation: timeline.current.count, underruns: audio.current.underruns, syncTimeouts: audio.current.syncTimeouts, pts: clock.ms }
-      setMetrics(current); setLastFrame(latestFrame.current)
+      setMetrics(current); setLastFrame(stats?.displayedFrame??latestFrame.current)
       if (stats) setRenderStats(stats)
       const completedTurn = completedTurns.current.poll(clock)
       if (completedTurn) {
@@ -182,24 +206,35 @@ export function GaussianStudio() {
         audio.current.finish(completedTurn); timeline.current.cancel(completedTurn)
       }
     }, 250)
+    let lastFull=0
     const telemetry = setInterval(() => {
+      if(ws.current?.readyState!==WebSocket.OPEN && !preview.active())return
       const clock = audio.current.clock()
-      send({ type: 'telemetry', ...renderer.current?.stats(), audio_queue_ms: clock.queuedMs,
-        turn_id: clock.turn, audio_pts_ms: clock.ms, underruns: audio.current.underruns, sync_timeouts: audio.current.syncTimeouts,
-        animation_frames: timeline.current.count, visibility: document.visibilityState,
-        control_mode: automaticRef.current ? 'auto' : 'manual',
-        rendered_frame: latestFrame.current ? { source:latestFrame.current.source, weights:latestFrame.current.weights,
-          head:latestFrame.current.head, gaze:latestFrame.current.gaze, natural_motion:latestFrame.current.natural_motion, pts_ms:latestFrame.current.pts_ms } : null })
-    }, 1000)
+      const now=performance.now(),stats=renderer.current?.stats()
+      const displayed=stats?.displayedFrame
+      const frame=displayed??latestFrame.current
+      const packet={type:'telemetry',event:'motion.sample',client_ms:now,renderSequence:stats?.renderSequence,
+        tracking_stage:displayed?'displayed':'requested',fps:stats?.fps,frames:stats?.frames,headMotion:stats?.headMotion,
+        roundTripMs:stats?.roundTripMs,renderMs:stats?.renderMs,audio_queue_ms:clock.queuedMs,
+        turn_id:clock.turn||frame?.turn_id,audio_pts_ms:clock.ms,underruns:audio.current.underruns,sync_timeouts:audio.current.syncTimeouts,
+        animation_frames:timeline.current.count,visibility:document.visibilityState,
+        control_mode:automaticRef.current?'auto':'manual',settings:{...runInfo.current,mode:preview.active()?'preview':runInfo.current.mode,natural_enabled:naturalEnabledRef.current,vitality:vitalityRef.current,controls:{...controlsRef.current}},
+        rendered_frame:frame ? {source:frame.source,turn_id:frame.turn_id,weights:frame.weights,raw_weights:frame.raw_weights,behavior:frame.behavior,
+          head:frame.head,gaze:frame.gaze,natural_motion:frame.natural_motion,pts_ms:frame.pts_ms}:null}
+      if(!send(packet))preview.add(packet)
+      if(stats?.rig && now-lastFull>=1000){send({type:'telemetry',event:'rig.sample',client_ms:now,rig:stats.rig});lastFull=now}
+      preview.tick(now)
+    }, 100)
     return () => { clearInterval(timer); clearInterval(telemetry) }
-  }, [send, trace])
+  }, [send, trace,preview])
   useEffect(() => { scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: 'smooth' }) }, [chats])
 
   const onEvent = useCallback((event: WireEvent) => {
     const type = event.type
     if (!['audio.chunk', 'animation.frame', 'transcript.delta'].includes(type)) trace(type, event)
     if (type === 'session.ready') { setState('ready'); send({ type: 'control', ...controlsRef.current, auto: automaticRef.current }) }
-    if (type === 'state') setState(String(event.state ?? 'ready').toLowerCase())
+    if (type === 'state') {const next=String(event.state??'ready').toLowerCase();setState(next)
+      if(['thinking','responding','speaking'].includes(next))motion.current.endListeningTurn()}
     if (type === 'audio.chunk') {
       const turn = String(event.turn_id)
       lastTurn.current = turn
@@ -214,6 +249,7 @@ export function GaussianStudio() {
     if (type === 'transcript.delta' || type === 'transcript.final') {
       const role = String(event.role ?? 'assistant'), id = `${event.turn_id ?? 'current'}:${role}`
       const nextText = String(event.text ?? event.delta ?? '')
+      if(role==='assistant' && nextText.trim() && event.turn_id)replyTextTurn.current=String(event.turn_id)
       setChats(previous => {
         const existing = previous.find(chat => chat.id === id)
         // The backend emits the complete partial transcript, not token deltas.
@@ -225,6 +261,7 @@ export function GaussianStudio() {
       const turn = String(event.turn_id ?? lastTurn.current)
       audio.current.finish(turn); timeline.current.cancel(turn)
       completedTurns.current.cancel(turn)
+      motion.current.resetPolicy()
     }
     if (type === 'turn.done') completedTurns.current.mark(String(event.turn_id), Number(event.duration_ms ?? 0))
     if (type === 'diagnostics') setTurnDiagnostics(event)
@@ -242,12 +279,13 @@ export function GaussianStudio() {
   const connect = async () => {
     if (!avatar || renderStatus !== 'ready') return
     setError(''); setState('connecting')
+    preview.finish();motion.current.resetPolicy();receiptTurn.current='';replyTextTurn.current=''
     try {
       await audio.current.prepare()
       audio.current.chunks = 0; audio.current.underruns = 0; audio.current.syncTimeouts = 0
       setMetrics(initialMetrics); setTurnDiagnostics(null); setBehaviorPlan('대화 시작 후 결정')
       timeline.current.clear(); idleFrame.current = null; completedTurns.current.clear()
-      const result = await request<{ id: string; ws_url: string }>('/sessions', json({ avatar_id: avatar.id, voice,
+      const result = await request<{ id: string; ws_url: string }>('/sessions', json({ avatar_id: avatar.id, voice,mode:mode==='wav'?'wav_test':'realtime',
         instructions: '당신은 따뜻하고 차분한 한국어 대화 파트너입니다. 사용자의 마음을 단정하지 말고 맥락에 맞게 짧게 공감하며 두 문장 이내로 답하세요. 감정에 적절한 비언어 행동을 선택하세요.' }))
       sessionRef.current = result.id; setSession(result.id); setChats([])
       const url = new URL(result.ws_url, location.href); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -259,6 +297,7 @@ export function GaussianStudio() {
     } catch (reason) { setState('error'); setError(errorMessage(reason)); trace('client.connect_error', errorMessage(reason)) }
   }
   const disconnect = () => {
+    motion.current.resetPolicy()
     microphone.current.stop(); micRef.current = false; setMic(false); setMicLevel(0)
     send({ type: 'interrupt' }); audio.current.stop(); timeline.current.clear(); idleFrame.current = null; completedTurns.current.clear()
     ws.current?.close(); ws.current = null; sessionRef.current = ''; setState('disconnected')
@@ -271,12 +310,12 @@ export function GaussianStudio() {
   const toggleMic = async () => {
     if (micRef.current) {
       microphone.current.stop(); micRef.current = false; setMic(false); setMicLevel(0)
-      send({ type: 'input.commit' }); trace('client.mic_commit'); return
+      motion.current.endListeningTurn();send({ type: 'input.commit' }); trace('client.mic_commit'); return
     }
     setError('')
     try {
       await audio.current.prepare(); interrupt(); send({ type: 'input.start' })
-      await microphone.current.start((pcm, rms) => { send({ type: 'input.audio', pcm_base64: pcm }); setMicLevel(rms) })
+      await microphone.current.start((pcm, rms) => { if(automaticRef.current&&naturalEnabledRef.current)motion.current.observeVoice(performance.now()/1000,.02,rms>.015);send({ type: 'input.audio', pcm_base64: pcm }); setMicLevel(rms) })
       micRef.current = true; setMic(true); setState('listening'); trace('client.mic_started')
     } catch (reason) { setError(`마이크를 시작하지 못했습니다: ${errorMessage(reason)}`); trace('client.mic_error', errorMessage(reason)) }
   }
@@ -287,12 +326,12 @@ export function GaussianStudio() {
     send({ type: 'input.text', text: value.trim() }); setText('')
   }
   const updateControls = useCallback((next: Partial<Controls>) => {
-    const value = { ...controlsRef.current, ...next }
+    const value = { ...controlsRef.current, ...next, nod:false }
+    if(next.nod)motion.current.requestNod(performance.now()/1000,'manual')
     controlsRef.current = value; setControls(value); idleFrame.current = null; setAutomatic(false); automaticRef.current = false
     send({ type: 'control', ...value })
-    if (next.nod) { nodUntil.current = performance.now() + 650; controlsRef.current.nod = false }
-    trace('client.control', next)
-  }, [send, trace, setAutomatic, setControls])
+    recordAction('control.override',{controls:value,request:next,auto:false})
+  }, [send,recordAction])
   const upload = async (file: File | undefined, importing: boolean) => {
     if (!file) return
     setUploading(true); setError('')

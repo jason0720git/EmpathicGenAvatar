@@ -43,6 +43,9 @@ class BehaviorIntent(BaseModel):
     intensity: float = Field(default=0.25, ge=0, le=1)
     intent: Literal["attentive", "supportive", "encouraging", "celebrating", "explaining"] = "attentive"
     nod: bool = False
+    move: Literal["acknowledge", "answer", "clarify", "reflect", "repair", "protect"] | None = None
+    stance: Literal["plain", "comfort", "steady", "encourage", "celebrate", "surprise"] | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
     head: HeadIntent = Field(default_factory=HeadIntent)
     gaze: GazeIntent = Field(default_factory=GazeIntent)
 
@@ -74,7 +77,7 @@ Before every spoken reply call set_avatar_behavior exactly once. Select a suitab
 The controller, not you, owns low-level facial motion. Never claim to be human or a clinician.
 Choose a clearly visible but appropriate intensity (usually 0.55-0.85 for emotional replies).
 Head angles are degrees. Use only head.pitch (up/down), head.yaw (left/right), and head.roll (sideways tilt); never output a head.tilt key. Keep angles small and mostly direct eye contact.
-The boolean nod belongs at the top level, never inside head. Example: {"emotion":"happy","intensity":0.7,"intent":"celebrating","nod":true,"head":{"pitch":0,"yaw":0,"roll":0},"gaze":{"x":0,"y":0}}.
+Include move, stance, and confidence (0..1) for every auto plan. Move describes the conversational action (acknowledge, answer, clarify, reflect, repair, protect). Stance describes how to deliver it (plain, comfort, steady, encourage, celebrate, surprise). Prefer plain for factual answers, comfort for loss, steady under stress. Repair and protect take precedence over positive affect. Choose response-appropriate behavior rather than copying the speaker's expression. If unsure, lower confidence. Nod is a top-level boolean; request one only for a meaningful acknowledgment, not by default when speech begins.
 For direct expression requests, show the requested emotion. For distress, choose concern/support rather than a smile.
 """
 

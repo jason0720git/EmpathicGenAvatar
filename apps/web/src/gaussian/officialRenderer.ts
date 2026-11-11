@@ -1,4 +1,4 @@
-import type {MotionFrame,RendererStats} from './types'
+import type {HeadMotionReceipt,MotionFrame,RendererStats} from './types'
 
 /** Demand-driven original GaussianAvatars GPU rendering, no recorded video. */
 export function createOfficialRenderer(container:HTMLElement,_asset:string,getFrame:()=>MotionFrame,
@@ -12,26 +12,39 @@ export function createOfficialRenderer(container:HTMLElement,_asset:string,getFr
     const ws=new WebSocket(url);ws.binaryType='arraybuffer'
     let disposed=false,ready=false,frames=0,sequence=0,fps=0,mark=performance.now(),lastCount=0,timer:ReturnType<typeof setTimeout>
     let renderMs=0,roundTripMs=0,sentAt=0,failure:string|undefined
+    let inFlight:MotionFrame|undefined,displayedFrame:MotionFrame|undefined
+    let pendingSequence:number|undefined,renderSequence:number|undefined,pendingHead:HeadMotionReceipt|undefined,headMotion:HeadMotionReceipt|undefined
     const stats=():RendererStats=>({fps,frames,head:true,splats:89021,oralVersion:'official-flame-native',tongue:false,
-      eyeOcclusionMode:'official-trained-appearance',renderMs,roundTripMs,error:failure})
+      eyeOcclusionMode:'official-trained-appearance',renderMs,roundTripMs,error:failure,displayedFrame,renderSequence,headMotion})
     const dispose=()=>{disposed=true;clearTimeout(timer);clearTimeout(timeout);ws.close();canvas.remove()}
     const fail=(message:string)=>{failure=message;if(!ready)reject(new Error(message));else onReady(stats());dispose()}
     const timeout=setTimeout(()=>fail('공식 GPU 렌더러에 연결할 수 없습니다. 8041 서비스 로그를 확인하세요.'),15000)
     const next=()=>{
       if(disposed)return
       if(ready && document.hidden){timer=setTimeout(next,250);return}
-      if(ws.readyState===WebSocket.OPEN){sentAt=performance.now();ws.send(JSON.stringify({...getFrame(),sequence:sequence++}))}
+      if(ws.readyState===WebSocket.OPEN){sentAt=performance.now();inFlight=getFrame();pendingHead=undefined;pendingSequence=undefined;ws.send(JSON.stringify({...inFlight,sequence:sequence++}))}
     }
     signal?.addEventListener('abort',()=>{if(!ready)reject(new DOMException('Aborted','AbortError'));dispose()},{once:true})
     ws.onopen=()=>{onProgress(.5);next()}
     ws.onerror=()=>fail('공식 GPU 렌더러 연결 오류')
     ws.onclose=()=>{if(!disposed)fail('공식 GPU 렌더러 연결이 종료되었습니다.')}
     ws.onmessage=async event=>{
-      if(typeof event.data==='string'){const data=JSON.parse(event.data);renderMs=data.render_ms;return}
+      if(typeof event.data==='string'){
+        const data=JSON.parse(event.data);renderMs=data.render_ms
+        if(data.sequence===sequence-1){
+          pendingSequence=data.sequence
+          if(typeof data.head_driver==='string' && [data.applied_head_deg?.pitch,data.applied_head_deg?.yaw,data.applied_head_deg?.roll,data.torso_anchor_splats,data.torso_drift_mm].every(Number.isFinite)
+            && Array.isArray(data.body_root_deg) && data.body_root_deg.length===3 && data.body_root_deg.every(Number.isFinite)){
+            pendingHead={driver:data.head_driver,applied:data.applied_head_deg,root:data.body_root_deg,torsoAnchorSplats:data.torso_anchor_splats,torsoDriftMm:data.torso_drift_mm}
+          }
+        }
+        return
+      }
       try {
         const bitmap=await createImageBitmap(new Blob([event.data],{type:'image/jpeg'}))
         if(disposed){bitmap.close();return}
         ctx.drawImage(bitmap,0,0);bitmap.close();frames++;roundTripMs=performance.now()-sentAt
+        displayedFrame=pendingSequence===undefined?undefined:inFlight;renderSequence=pendingSequence;headMotion=pendingHead
         if(performance.now()-mark>=1000){fps=(frames-lastCount)*1000/(performance.now()-mark);lastCount=frames;mark=performance.now()}
         if(!ready){ready=true;clearTimeout(timeout);onProgress(1);onReady(stats());resolve({dispose,stats,resetView:()=>{}})}
         // Exactly one frame in flight: slow GPU cannot accumulate stale lip poses.
