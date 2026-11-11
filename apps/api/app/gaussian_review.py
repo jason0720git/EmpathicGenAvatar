@@ -15,6 +15,7 @@ def summary(directory: Path) -> dict:
                                           "avatar_engine", "render_driver", "controller")}
     counts, stages, policies, drivers = Counter(), Counter(), Counter(), Counter()
     turns, ranges, errors, control_settings = {}, {}, [], []
+    nod_outcomes, face_states = Counter(), Counter()
     invalid = 0
 
     def measure(key, value):
@@ -57,6 +58,9 @@ def summary(directory: Path) -> dict:
             tag = d.get("event")
             if isinstance(tag, str) and tag.startswith("policy."):
                 policies[tag] += 1
+                decision = mapping(d.get("details"))
+                if tag == "policy.nod_gate":
+                    nod_outcomes[f"{decision.get('cue', 'unknown')}/{decision.get('reason', 'unknown')}"] += 1
             if tag != "motion.sample":
                 continue
             stage = d.get("tracking_stage")
@@ -66,6 +70,10 @@ def summary(directory: Path) -> dict:
             if settings and (not control_settings or settings != control_settings[-1]):
                 control_settings.append(settings)
             frame = mapping(d.get("rendered_frame"))
+            policy = mapping(mapping(frame.get("natural_motion")).get("policy"))
+            if isinstance(policy.get("state"), str):
+                face_states[policy["state"]] += 1
+            measure(f"{stage}_nod_pitch_deg", policy.get("nod_pitch_deg"))
             head = mapping(frame.get("head"))
             motion = mapping(d.get("headMotion"))
             if isinstance(motion.get("driver"), str):
@@ -83,5 +91,6 @@ def summary(directory: Path) -> dict:
         stats["mean"] = stats.pop("sum") / stats["n"]
     return {**result, "schema": 1, "motion_samples": sum(stages.values()), "sample_stages": dict(stages),
             "head_drivers": dict(drivers), "sampled_ranges": ranges, "events": dict(counts),
-            "policy_events": dict(policies), "settings_history": control_settings,
+            "policy_events": dict(policies), "nod_decisions": dict(nod_outcomes),
+            "sampled_face_states": dict(face_states), "settings_history": control_settings,
             "turns": turns, "errors": errors, "incomplete_lines": invalid}

@@ -32,6 +32,7 @@ export class NaturalMotion {
   private policy=new SobiaPolicy()
   observeVoice(now:number,seconds:number,voiced:boolean) { this.policy.observeVoice(now,seconds,voiced) }
   endListeningTurn() { this.policy.endListeningTurn() }
+  cancelTurn() { this.policy.cancelTurn() }
   requestNod(now:number,cue:'manual'|'spoken_receipt') { return this.policy.requestNod(now,cue) }
   drainPolicyEvents() { return this.policy.drainEvents() }
   resetPolicy() {
@@ -57,7 +58,7 @@ export class NaturalMotion {
     this.activation=follow(this.activation,Number(speaking),dt,.3)
     if(speaking && frame.turn_id!==this.rawTurn){this.rawTurn=frame.turn_id;this.rawMean={}}
     const p=this.prosody.update(frame.speech_energy??0,speaking,dt,frame.turn_id)
-    const {diagnostics:policy,weights:semanticWeights}=this.policy.sample(frame,now,speaking,true,p.accent,p.boundary)
+    const {diagnostics:policy,weights:semanticWeights}=this.policy.sample(frame,now,speaking,true,clamp(p.accent*gain),clamp(p.boundary*gain))
     if(p.triggered){this.accentAt=now;this.accentStrength=p.accent;this.gestureIndex++}
     const phase=(now-this.accentAt)/.72
     const beat=phase>=0&&phase<1?Math.sin(Math.PI*phase)**2*this.accentStrength:0

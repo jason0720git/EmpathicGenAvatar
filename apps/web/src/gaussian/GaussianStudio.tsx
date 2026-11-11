@@ -139,8 +139,10 @@ export function GaussianStudio() {
     const frame = timeline.current.sample(clock.turn, clock.ms)
     const manual = manualFrame(automaticRef.current ? {...DEFAULT_CONTROLS,intensity:0} : controlsRef.current, performance.now() / 1000)
     const now=performance.now()/1000
-    if(clock.speaking && automaticRef.current && naturalEnabledRef.current && clock.turn && clock.turn===replyTextTurn.current && receiptTurn.current!==clock.turn){
-      receiptTurn.current=clock.turn;motion.current.requestNod(now,'spoken_receipt')
+    if(clock.speaking && clock.turn && receiptTurn.current!==clock.turn){
+      receiptTurn.current=clock.turn
+      if (automaticRef.current && naturalEnabledRef.current && clock.turn===replyTextTurn.current)
+        motion.current.requestNod(now,'spoken_receipt')
     }
     // Idle server policy can arrive without any output audio.
     const selected = !automaticRef.current
@@ -232,7 +234,11 @@ export function GaussianStudio() {
         rendered_frame:frame ? {source:frame.source,turn_id:frame.turn_id,weights:frame.weights,raw_weights:frame.raw_weights,behavior:frame.behavior,
           head:frame.head,gaze:frame.gaze,natural_motion:frame.natural_motion,pts_ms:frame.pts_ms}:null}
       if(!send(packet))preview.add(packet)
-      if(stats?.rig && now-lastFull>=1000){send({type:'telemetry',event:'rig.sample',client_ms:now,rig:stats.rig});lastFull=now}
+      if(stats?.rig && now-lastFull>=1000){
+        const rig={type:'telemetry',event:'rig.sample',client_ms:now,rig:stats.rig}
+        if(!send(rig))preview.add(rig)
+        lastFull=now
+      }
       preview.tick(now)
     }, 100)
     return () => { clearInterval(timer); clearInterval(telemetry) }
@@ -259,7 +265,10 @@ export function GaussianStudio() {
     if (type === 'transcript.delta' || type === 'transcript.final') {
       const role = String(event.role ?? 'assistant'), id = `${event.turn_id ?? 'current'}:${role}`
       const nextText = String(event.text ?? event.delta ?? '')
-      if(role==='assistant' && nextText.trim() && event.turn_id)replyTextTurn.current=String(event.turn_id)
+      if(role==='assistant' && nextText.trim() && event.turn_id){
+        const clock=audio.current.clock(),turnId=String(event.turn_id)
+        if (clock.turn!==turnId || clock.ms<0) replyTextTurn.current=turnId
+      }
       setChats(previous => {
         const existing = previous.find(chat => chat.id === id)
         // The backend emits the complete partial transcript, not token deltas.

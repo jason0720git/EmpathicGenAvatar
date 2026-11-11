@@ -72,6 +72,17 @@ describe('SOBIA captured-voice and reply nods', () => {
     motion.apply(f,3.6,true)
     expect(motion.apply(f,6,true).natural_motion?.policy?.nod_grants).toBe(1)
   })
+
+  it('cancels a running gesture on interruption and preserves the inter-gesture interval', () => {
+    const motion=new NaturalMotion()
+    motion.requestNod(1,'manual')
+    motion.apply(base,1.3,false)
+    motion.cancelTurn()
+    expect(motion.apply(base,1.4,false).natural_motion?.policy?.nod_phase).toBe('idle')
+    expect(motion.drainPolicyEvents().some(row=>row.event==='nod_cancelled')).toBe(true)
+    expect(motion.requestNod(1.5,'spoken_receipt')).toBe(false)
+    expect(motion.requestNod(3.2,'spoken_receipt')).toBe(true)
+  })
 })
 
 describe('SOBIA semantic trajectories', () => {

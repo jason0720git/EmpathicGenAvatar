@@ -129,7 +129,7 @@ def create_gaussian_app(root: Path | None = None, api_key: str | None = None) ->
     async def health():
         a2f, generator = await asyncio.gather(A2FClient(a2f_endpoint).health(), generator_health())
         return {"openai": {"ready": bool(key), "model": model, "status": "configured" if key else "missing_key"},
-                "a2f": a2f, "generator": generator, "renderer": "LAM 3DGS WebGL",
+                "a2f": a2f, "generator": generator, "renderer": "GaussianAvatars 306 FLAME / LAM 3DGS WebGL",
                 "logging": {"enabled": True, "path": str(data / "sessions"), "audio": True, "transcripts": True},
                 "controller": CONTROLLER}
 

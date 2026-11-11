@@ -36,6 +36,15 @@ export class SobiaPolicy {
   }
   drainEvents() { return this.events.splice(0) }
 
+  cancelTurn() {
+    if (this.active) this.emit('nod_cancelled',{cue:this.active.cue,grant:this.grants,reason:'turn_cancelled'})
+    this.active=null
+    this.face.current=null
+    this.decision=''
+    this.lowConfidenceTurn=null
+    this.endListeningTurn()
+  }
+
   endListeningTurn() {
     if (this.lastVoiceTime !== null) this.emit('listener_capture_end', {at_s:this.lastVoiceTime,voiced_s:this.voiced,pause_s:this.pause})
     this.voiced = this.pause = this.sinceCandidate = 0
@@ -132,11 +141,12 @@ export class SobiaPolicy {
           if (this.face.start(frame.turn_id,input.move,input.stance,input.intensity??.5,now)) {
             const face = this.face.current!
             this.emit('expression_start',{at_s:now,turn_id:face.turn,state:face.state,seed:face.seed,
-              move:face.move,stance:face.stance,intensity:face.intensity})
+              move:face.move,stance:face.stance,intensity:face.intensity,style:{...face.style}})
           }
         } else if (!this.face.current) this.lowConfidenceTurn=frame.turn_id
       }
-      if (input?.nod && input.source==='llm_tool_call' && this.lastPlanTurn !== frame.turn_id
+      if (input?.nod && input.source==='llm_tool_call' && (input.confidence==null || input.confidence>=minimumSemanticConfidence)
+           && this.lastPlanTurn !== frame.turn_id
            && frame.pts_ms >= (input.nod_start_seconds??.45)*1000) {
         this.lastPlanTurn=frame.turn_id
         this.requestNod(now,'llm_plan')
@@ -151,7 +161,8 @@ export class SobiaPolicy {
       emotion:this.manualLabel, ...nod, nod_grants:this.grants, voiced_s:this.voiced, pause_s:this.pause,
     }
     // A retained reaction settles to its authored resting value between turns.
-    const weights = face ? sampleCompanionFace(face,now,speaking && !idle ? accent : 0,speaking && !idle ? boundary : 0) : suppressed ? {} : null
+    const activeSpeech = speaking && !idle
+    const weights = face ? sampleCompanionFace(face,now,activeSpeech ? accent : 0,activeSpeech ? boundary : 0,activeSpeech) : suppressed ? {} : null
     return {diagnostics,weights}
   }
 }
